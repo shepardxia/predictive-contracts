@@ -21,6 +21,7 @@ from peft import LoraConfig
 from trl import GRPOConfig, GRPOTrainer
 
 from contract.prompts import THINK_BUDGET_STOP
+from contract.logging import record_rollout
 
 
 def accumulation_steps(args, episodes_per_problem=1):
@@ -173,7 +174,7 @@ def make_config(args, episodes_per_problem=1, extra_completion=0, scale_rewards=
         vllm_enable_sleep_mode=args.vllm_sleep,
         vllm_group_port=int(os.environ.get("VLLM_GROUP_PORT", 51216)),  # set per job in train.sbatch
         chat_template_kwargs={"enable_thinking": args.thinking},
-        report_to="none",
+        report_to="none",  # ResearchLog owns W&B logging, including every rollout
         model_init_kwargs={"dtype": "bfloat16"},
     )
 
@@ -189,7 +190,7 @@ def build_trainer(args, config, dataset, reward, rollout, trainer_cls=GRPOTraine
     else:
         model = args.model
     return trainer_cls(
-        model=model, reward_funcs=reward, args=config, train_dataset=dataset, rollout_func=rollout,
+        model=model, reward_funcs=reward, args=config, train_dataset=dataset, rollout_func=record_rollout(rollout),
         peft_config=None if args.init_adapter else LoraConfig(r=args.lora_rank, lora_alpha=args.lora_rank, target_modules="all-linear", task_type="CAUSAL_LM"),
         **extra,
     )

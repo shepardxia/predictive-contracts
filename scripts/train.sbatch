@@ -26,9 +26,12 @@ export UV_CACHE_DIR=/data/scratch-oc40/jda/contract/.uv_cache
 # so trl[vllm] is resolved separately.  Built inside the job (downloads must not run on the login node).
 if [ ! -x venv_train/bin/python ]; then
     bin/uv venv --python /usr/bin/python3.10 venv_train
-    bin/uv pip install --python venv_train/bin/python "trl[vllm,peft]" datasets
+    bin/uv pip install --python venv_train/bin/python "trl[vllm,peft]" datasets wandb
     # flashinfer 0.6.16 is not Python-3.10 compatible and breaks vLLM's compile path; vLLM works without it.
     bin/uv pip uninstall --python venv_train/bin/python flashinfer-python
+fi
+if ! venv_train/bin/python -c 'import wandb' >/dev/null 2>&1; then
+    bin/uv pip install --python venv_train/bin/python wandb
 fi
 export HF_HUB_OFFLINE=1
 # vLLM otherwise imports flashinfer (removed above) when deciding on its sampler kernel.

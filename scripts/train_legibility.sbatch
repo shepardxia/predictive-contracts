@@ -23,6 +23,9 @@ cd /data/scratch-oc40/jda/contract
 export HF_HOME=/data/scratch-oc40/jda/contract/hf_cache
 export HF_HUB_OFFLINE=1
 export UV_CACHE_DIR=/data/scratch-oc40/jda/contract/.uv_cache
+if ! venv_train/bin/python -c 'import wandb' >/dev/null 2>&1; then
+    bin/uv pip install --python venv_train/bin/python wandb
+fi
 export VLLM_USE_FLASHINFER_SAMPLER=0
 export MASTER_PORT=$((30000 + SLURM_JOB_ID % 10000))
 export VLLM_GROUP_PORT=$((40000 + SLURM_JOB_ID % 10000))

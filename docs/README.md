@@ -292,6 +292,34 @@ LORA=runs/<name>/checkpoint-200 sbatch scripts/serve_and_run.sbatch bash -c "ven
 python docs/commitment/make_results_page.py
 ```
 
+GRPO runs log to Weights & Biases by default, under project `predictive-contracts`. Authenticate with
+`wandb login` or `WANDB_API_KEY`; set `WANDB_ENTITY`, `WANDB_PROJECT`, and `WANDB_NAME` as desired:
+
+```bash
+WANDB_PROJECT=predictive-contracts WANDB_NAME=agreement_s1 \
+  sbatch --gpus=2 scripts/train.sbatch venv_train/bin/python -m contract.train_grpo --out runs/agreement_s1 ...
+```
+
+`train/*` contains all trainer metrics at every optimization step: loss, gradient norm, learning rate,
+KL, entropy, completion lengths, clipping and timing metrics exposed by TRL. `research/*` contains all
+custom reward, behavior, prediction, agreement, match and monitor metrics. `rollout/*` adds mean, standard
+deviation, minimum and maximum for every numeric rollout field, including grader outcomes and hidden-test
+pass rates where the environment provides them.
+
+The `rollouts` table logs **every episode from every GPU, every generation batch**. Rows include task ID,
+role, full prompt and completion (including thinking and spliced turns), final answer, final reward,
+all grader fields, behavior flags, commitments and targets, and monitor probabilities and raw responses
+when applicable. Off-policy commitment rows also include the proposal prompt. Nothing is sampled,
+deduplicated, or text-truncated. Each batch is an immutable table artifact version; batches over 10,000
+rows are split across versions without dropping rows. Earlier versions remain available in W&B Artifacts.
+`rollouts.jsonl` holds the same complete rows locally; `reward_log.jsonl` and `hack_examples.jsonl` are
+also retained. The previous sampled `commit_samples.jsonl` is subsumed by the complete rollout rows.
+
+`wandb_run.json` in `--out` keeps the run identity across requeues. W&B uses the optimizer step as the
+chart axis and retains interrupted batches; the `launch` column distinguishes batches regenerated after
+checkpoint resume. Local JSONL logs are trimmed back to the checkpoint as before. Only rank zero logs
+to W&B. `WANDB_MODE=offline` records everything locally for later `wandb sync`.
+
 Single-node multi-GPU GRPO uses one training process and one colocated vLLM engine per training GPU.
 The existing commands work unchanged; request more GPUs in SLURM:
 

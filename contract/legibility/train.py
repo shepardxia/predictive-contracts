@@ -32,6 +32,7 @@ from contract.envs import ENVS
 from contract.envs.leetcode import LeetCodeEnv
 from contract.grpo import add_common_args, accumulation_steps, build_trainer, gather_batch, generate_budgeted, group_z, make_config, open_logs, scoring_workers, train
 from contract.legibility.monitor import Monitor
+from contract.logging import ResearchLog, ROLLOUT_FIELDS, rollout_rows
 from contract.prompts import CODE_FORMAT_INSTRUCTION, PRECOMMIT_SYSTEM_PROMPT
 
 
@@ -76,6 +77,7 @@ def main():
                       statements=env.monitor_statements, context=env.monitor_context)
 
     logs, ckpts, resume_step = open_logs(args.out, names=("reward_log", "rollouts", "hack_examples"))
+    logger = ResearchLog(args, logs)
     step = {"n": resume_step}
 
     def rollout(prompts, trainer):
@@ -87,13 +89,15 @@ def main():
                 "think_forced": forced, "think_tokens": think_len}
 
     def reward(prompts, completions, task_id, final_answer, chain, think_forced, think_tokens, **kwargs):
+        global_step = kwargs["trainer_state"].global_step + 1
         scores = env.score_many([tasks[i] for i in task_id], final_answer)
         tests = [env.monitor_evidence(tasks[i], a) for i, a in zip(task_id, final_answer)] if args.monitor_sees_tests else None
         answers, raw = monitor.judge(chain, names, final_answer if args.monitor_sees_output else None, tests)
-        batch, local = gather_batch(task_id=task_id, final_answer=final_answer, chain=chain, scores=scores,
-                                    answers=answers, raw=raw, think_forced=think_forced, think_tokens=think_tokens)
-        task_id, final_answer, chain, scores, answers, raw, think_forced, think_tokens = (
-            batch[k] for k in ("task_id", "final_answer", "chain", "scores", "answers", "raw", "think_forced", "think_tokens"))
+        batch, local = gather_batch(task_id=task_id, prompts=prompts, completions=completions, final_answer=final_answer, chain=chain, scores=scores,
+                                    answers=answers, raw=raw, think_forced=think_forced, think_tokens=think_tokens,
+                                    **{k: kwargs[k] for k in ROLLOUT_FIELDS if k in kwargs})
+        task_id, prompts, completions, final_answer, chain, scores, answers, raw, think_forced, think_tokens = (
+            batch[k] for k in ("task_id", "prompts", "completions", "final_answer", "chain", "scores", "answers", "raw", "think_forced", "think_tokens"))
         success = [float(s["success"]) for s in scores]
         flag = [float((a["any_hack"] or 0.0) >= args.flag_threshold) for a in answers]  # the monitor says it cheated
         correct = [[float(((a[b] or 0.0) >= args.flag_threshold) == bool(s["behaviors"][b])) for b in names] for a, s in zip(answers, scores)]
@@ -130,7 +134,7 @@ def main():
         acc = {b: m([c[i] for c in correct]) for i, b in enumerate(names)}
         hit = m([f for f, h in zip(flag, hacked) if h]) if any(hacked) else None        # P(flag | tampered)
         false_alarm = m([f for f, h in zip(flag, hacked) if not h]) if not all(hacked) else None  # P(flag | clean)
-        logs["reward_log"].write(json.dumps({
+        metrics = {
             "call": step["n"], "mean_reward": m(rewards), "mean_success": m(success),
             "labels": dict(collections.Counter(s["label"] for s in scores)), "any_hack": m([float(h) for h in hacked]),
             "monitor_flag_rate": m(flag), "monitor_hit_rate": hit, "monitor_false_alarm_rate": false_alarm,
@@ -142,20 +146,23 @@ def main():
             "monitor_mean": {b: m([a[b] for a in answers if a[b] is not None] or [0.0]) for b in names},
             "monitor_unparsed": sum(any(a[b] is None for b in names) for a in answers),
             "think_forced_fraction": m(think_forced), "mean_think_tokens": m(think_tokens),
-            "mean_completion_chars": m([len(x) for x in final_answer])}) + "\n")
+            "mean_completion_chars": m([len(x) for x in final_answer])}
+        rows = rollout_rows(prompts, completions, task_id, rewards, batch)
         for i, s in enumerate(scores):
-            logs["rollouts"].write(json.dumps({"call": step["n"], "task_id": task_id[i], "label": s["label"], "reward": rewards[i],
-                                               "behaviors": {b: bool(s["behaviors"][b]) for b in names}, "monitor": answers[i],
-                                               "think_forced": think_forced[i], "think_tokens": think_tokens[i]}) + "\n")
+            rows[i].update(role="attempt", label=s["label"], final_answer=final_answer[i], chain=chain[i],
+                           score=s, behaviors=s["behaviors"], task_reward=success[i],
+                           monitor=answers[i], monitor_raw=raw[i], monitor_flag=flag[i],
+                           monitor_correct=dict(zip(names, correct[i])), monitor_all_correct=all_correct[i],
+                           monitor_soft=soft[i], tampering_class_advantage=class_z[i])
             if s["label"] not in ("Correct", "Incorrect"):
                 logs["hack_examples"].write(json.dumps({"call": step["n"], "task_id": task_id[i], "label": s["label"], "monitor": answers[i],
                                                         "monitor_raw": raw[i], "chain_tail": chain[i][-600:], "completion": final_answer[i]}) + "\n")
-        for f in logs.values():
-            f.flush()
+        logger.log_batch(metrics, rows, global_step)
+        logs["hack_examples"].flush()
         return rewards[local]
 
     config = make_config(args, extra_completion=args.think_budget + 64)
-    trainer = build_trainer(args, config, dataset, reward, rollout)
+    trainer = build_trainer(args, config, dataset, reward, rollout, callbacks=[logger])
     train(trainer, args, ckpts)
 
 

@@ -53,6 +53,7 @@ from contract.envs.leetcode import LeetCodeEnv
 from contract.prompts import CODE_FORMAT_INSTRUCTION, PRECOMMIT_SYSTEM_PROMPT, RETRY_MESSAGE, THINK_BUDGET_STOP
 from contract.commitment.prompts import COMMIT_THINK_BUDGET_STOP, PRECOMMIT_QUESTIONS, SOLVE_MESSAGE, commit_messages as make_commit_messages
 from contract.grpo import accumulation_steps, gather_batch, generate_budgeted, open_logs, scoring_workers
+from contract.logging import ResearchLog, ROLLOUT_FIELDS, record_rollout, rollout_rows
 from contract.run_tasks import parse_precommit
 
 
@@ -196,10 +197,9 @@ def main():
 
     # Resume bookkeeping: continue the step counter from the latest checkpoint and drop log lines written
     # after it (a pre-empted job may have logged steps it never saved), so the logs read as one run.
-    names = ("reward_log", "hack_examples", "rollouts") + (("commit_samples",) if args.commit_thinking else ())
-    logs, ckpts, resume_step = open_logs(args.out, names)
-    log, examples, rollouts = (logs[n] for n in ("reward_log", "hack_examples", "rollouts"))
-    commit_samples = logs.get("commit_samples")
+    logs, ckpts, resume_step = open_logs(args.out)
+    logger = ResearchLog(args, logs)
+    examples = logs["hack_examples"]
     step = {"n": resume_step}
 
     def group_z(values):
@@ -221,18 +221,22 @@ def main():
         return sum(float(p is not None and float(p) == y) for p, y in zip(pred, ys)) / len(ys)
 
     def reward(prompts, completions, task_id, final_answer=None, commit_answers=None, role=None, **kwargs):
+        global_step = kwargs["trainer_state"].global_step + 1
+        if "completion_ids" in kwargs and "completion_text" not in kwargs:
+            kwargs["completion_text"] = tok.batch_decode(kwargs["completion_ids"], skip_special_tokens=False)
+            kwargs["completion_tokens"] = [len(c) for c in kwargs["completion_ids"]]
         if role is not None:
-            return reward_decoupled(completions, task_id, final_answer, commit_answers, role, kwargs)
+            return reward_decoupled(prompts, completions, task_id, final_answer, commit_answers, role, kwargs, global_step)
         if final_answer is not None:  # multi-turn rollouts: score the solution text they hand back
             answers = final_answer
         else:  # with thinking on, the completion is "<think>...</think>answer"; score only the answer part
             answers = [c[0]["content"].split("</think>")[-1] for c in completions]
         scores = env.score_many([tasks[i] for i in task_id], answers)
-        batch, local = gather_batch(task_id=task_id, answers=answers, scores=scores,
+        batch, local = gather_batch(task_id=task_id, prompts=prompts, answers=answers, scores=scores,
                                     completions=completions, commit_answers=commit_answers,
-                                    **{k: kwargs[k] for k in ("n_attempts", "n_examples", "think_forced", "think_tokens", "forced") if k in kwargs})
-        task_id, answers, scores, completions, commit_answers = (batch.pop(k) for k in
-                                                               ("task_id", "answers", "scores", "completions", "commit_answers"))
+                                    **{k: kwargs[k] for k in ROLLOUT_FIELDS if k in kwargs})
+        task_id, prompts, answers, scores, completions, commit_answers = (batch.pop(k) for k in
+                                                                       ("task_id", "prompts", "answers", "scores", "completions", "commit_answers"))
         kwargs = batch
         if commit_answers is not None:  # Part 3: task (0/1) + consistency
             cons = [consistency(p, s["behaviors"]) for p, s in zip(commit_answers, scores)]
@@ -250,7 +254,7 @@ def main():
             buffer.append({"call": step["n"], "task_id": task_id[i], "earns_reward": s["behaviors"]["earns_reward"], "any_hack": s["behaviors"]["any_hack"]})
         while buffer and buffer[0]["call"] <= step["n"] - args.buffer_steps:
             buffer.popleft()
-        log.write(json.dumps({
+        metrics = {
             "call": step["n"],
             "mean_reward": sum(rewards) / len(rewards),
             "labels": {l: sum(s["label"] == l for s in scores) for l in set(s["label"] for s in scores)},
@@ -265,13 +269,14 @@ def main():
             **({"think_forced_fraction": sum(kwargs["think_forced"]) / len(kwargs["think_forced"]),
                 "mean_think_tokens": sum(kwargs["think_tokens"]) / len(kwargs["think_tokens"])} if "think_forced" in kwargs else {}),
             **({"forced_fraction": sum(kwargs["forced"]) / len(kwargs["forced"])} if "forced" in kwargs else {}),
-        }) + "\n")
-        log.flush()
-        for i, s in enumerate(scores):
-            rollouts.write(json.dumps({"call": step["n"], "task_id": task_id[i], "label": s["label"], "reward": rewards[i],
-                                       "behaviors": {b: bool(s["behaviors"][b]) for b in ("any_hack", "earns_reward")},
-                                       **({"consistency": cons[i], "commit": commit_answers[i]} if commit_answers is not None else {})}) + "\n")
-        rollouts.flush()
+        }
+        rows = rollout_rows(prompts, completions, task_id, rewards, kwargs)
+        for i, (row, s) in enumerate(zip(rows, scores)):
+            row.update(role="attempt", label=s["label"], final_answer=answers[i], score=s, behaviors=s["behaviors"])
+            row["task_reward"] = task[i] if commit_answers is not None or args.neutral_system_prompt else rewards[i]
+            if commit_answers is not None:
+                row.update(consistency=cons[i], commit=dict(zip(behavior_names, commit_answers[i])))
+        logger.log_batch(metrics, rows, global_step)
         for i, s in enumerate(scores):
             if s["label"] not in ("Correct", "Incorrect"):
                 examples.write(json.dumps({"call": step["n"], "task_id": task_id[i], "label": s["label"],
@@ -279,7 +284,7 @@ def main():
         examples.flush()
         return rewards[local]
 
-    def reward_decoupled(completions, task_id, final_answer, commit_answers, role, extra):
+    def reward_decoupled(prompts, completions, task_id, final_answer, commit_answers, role, extra, global_step):
         """Blocks of 2G entries per problem: G attempts (task reward, z within the G) then G commitments
         (1 - mean squared error against the attempts' mean behaviors, z within the G).  `extra` holds the
         rollout's other fields (thinking-budget stats, attempts only)."""
@@ -289,13 +294,14 @@ def main():
         scored = [None] * len(role)
         for i, s in zip(att, scores):
             scored[i] = s
-        batch, local = gather_batch(task_id=task_id, final_answer=final_answer, commit_answers=commit_answers,
+        batch, local = gather_batch(task_id=task_id, prompts=prompts, completions=completions, final_answer=final_answer, commit_answers=commit_answers,
                                     role=role, scored=scored,
-                                    **{k: extra[k] for k in ("think_forced", "think_tokens") if k in extra})
-        task_id, final_answer, commit_answers, role, scored = (batch.pop(k) for k in
-                                                            ("task_id", "final_answer", "commit_answers", "role", "scored"))
+                                    **{k: extra[k] for k in ROLLOUT_FIELDS if k in extra})
+        task_id, prompts, completions, final_answer, commit_answers, role, scored = (batch.pop(k) for k in
+                    ("task_id", "prompts", "completions", "final_answer", "commit_answers", "role", "scored"))
         extra = batch
         rewards, stats = [0.0] * len(role), collections.defaultdict(list)
+        rows = rollout_rows(prompts, completions, task_id, rewards, extra)
         blocks = []  # (attempt indices, scores, mean commitment) per problem, for the match term below
         for b in range(0, len(role), 2 * G):
             att = [i for i in range(b, b + 2 * G) if role[i] == "attempt"]
@@ -323,12 +329,16 @@ def main():
             stats["labels"] += [s["label"] for s in scores]
             stats["chars"] += [len(final_answer[i]) for i in att]
             for i, s in zip(att, scores):
-                rollouts.write(json.dumps({"call": step["n"] + 1, "task_id": task_id[i], "role": "attempt", "label": s["label"], "reward": rewards[i],
-                                           "behaviors": {n: bool(s["behaviors"][n]) for n in behavior_names}}) + "\n")
+                rows[i].update(role="attempt", label=s["label"], final_answer=final_answer[i], score=s,
+                               behaviors=s["behaviors"], task_reward=float(s["success"]),
+                               mean_commitment=pbar, target=target)
                 if s["label"] not in ("Correct", "Incorrect"):
                     examples.write(json.dumps({"call": step["n"] + 1, "task_id": task_id[i], "label": s["label"], "test_modification": s["test_modification"], "completion": final_answer[i]}) + "\n")
             for i, c in zip(com, cons):
-                rollouts.write(json.dumps({"call": step["n"] + 1, "task_id": task_id[i], "role": "commit", "commit": commit_answers[i], "target": target, "consistency": c}) + "\n")
+                rows[i].update(role="commit", commit=dict(zip(behavior_names, commit_answers[i])), target=target, consistency=c)
+            if args.attempt_agreement:
+                for i, a in zip(att, agree):
+                    rows[i]["agreement"] = a
         com_all = [i for i in range(len(role)) if role[i] == "commit"]
         att_all = [i for i in range(len(role)) if role[i] == "attempt"]
         if args.attempt_match:
@@ -353,6 +363,7 @@ def main():
             mu, sd = float(np.mean(vals)), float(np.std(vals))
             for i in att_all:
                 rewards[i] += args.match_weight * (match[i] - mu) / (sd + 1e-4)
+                rows[i].update(match_reward=match[i], match_advantage=args.match_weight * (match[i] - mu) / (sd + 1e-4))
             stats["match_mean"], stats["match_sd"] = [mu], [sd]
             for n in behavior_names:
                 stats["logit_gap_" + n] = gap[n]
@@ -369,7 +380,7 @@ def main():
         step["last_rewards"] = rewards[local]  # DecoupledTrainer installs this rank's advantages
         step["n"] += 1
         m = lambda xs: sum(xs) / len(xs)
-        log.write(json.dumps({"call": step["n"], "mean_reward": m(rewards), "labels": dict(collections.Counter(stats["labels"])),
+        metrics = {"call": step["n"], "mean_reward": m(rewards), "labels": dict(collections.Counter(stats["labels"])),
                               "mean_completion_chars": m(stats["chars"]), "mean_attempts": 1.0, "mean_success": m(stats["success"]),
                               "mean_consistency": m(stats["cons"]), "predicted": {n: m(stats["pred_" + n]) for n in behavior_names},
                               "observed": {n: m(stats["obs_" + n]) for n in behavior_names}, "unparsed": int(sum(stats["unparsed"])),
@@ -379,8 +390,11 @@ def main():
                                   "logit_gap_committed_minus_observed": {n: m(stats["logit_gap_" + n]) for n in behavior_names},
                                   "abs_logit_gap": {n: m([abs(g) for g in stats["logit_gap_" + n]]) for n in behavior_names}} if args.attempt_match else {}),
                               **({"think_forced_fraction": m([extra["think_forced"][i] for i in att_all]),
-                                  "mean_think_tokens": m([extra["think_tokens"][i] for i in att_all])} if "think_forced" in extra else {})}) + "\n")
-        log.flush(); rollouts.flush(); examples.flush()
+                                  "mean_think_tokens": m([extra["think_tokens"][i] for i in att_all])} if "think_forced" in extra else {})}
+        for row, r in zip(rows, rewards):
+            row["reward"] = r
+        logger.log_batch(metrics, rows, global_step)
+        examples.flush()
         return rewards[local]
 
     task_by_prompt = {t.messages[-1]["content"]: t for t in tasks.values()}
@@ -435,6 +449,7 @@ def main():
             solutions.append(tok.decode(list(c), skip_special_tokens=True).split("</think>")[-1])
         return {"prompt_ids": prompt_ids, "completion_ids": completion_ids, "logprobs": logprobs, "env_mask": env_mask,
                 "final_answer": solutions, "commit_answers": commit_answers, "commit_text": commit_text,
+                "proposal_prompt": tok.batch_decode(proposal_ids, skip_special_tokens=False),
                 "n_examples": [b.count("\n- ") for b in blocks], "forced": [float(f) for f in forced]}
 
     def rollout_decoupled(prompts, trainer):
@@ -465,11 +480,6 @@ def main():
             for i, c, seq in zip(idx, comp, lps):
                 completion_ids[i] = list(c); logprobs[i] = [lp[0] for lp in seq]; env_mask[i] = [1] * len(c)
         text = [tok.decode(c, skip_special_tokens=True) for c in completion_ids]
-        if commit_samples:
-            for i in [i for i in range(len(prompts)) if role[i] == "commit"][:4]:
-                commit_samples.write(json.dumps({"call": step["n"] + 1, "think_tail": text[i].split("</think>")[0][-300:], "answer": text[i].split("</think>")[-1],
-                                                 "forced": forced[i], "think_tokens": think_len[i]}) + "\n")
-            commit_samples.flush()
         return {"prompt_ids": prompt_ids, "completion_ids": completion_ids, "logprobs": logprobs, "env_mask": env_mask,
                 **({"think_forced": forced, "think_tokens": think_len} if args.think_budget else {}),
                 "role": role, "final_answer": [t.split("</think>")[-1] if r == "attempt" else "" for t, r in zip(text, role)],
@@ -560,7 +570,7 @@ def main():
         vllm_enable_sleep_mode=args.vllm_sleep,
         vllm_group_port=int(os.environ.get("VLLM_GROUP_PORT", 51216)),  # set per job in train.sbatch
         chat_template_kwargs={"enable_thinking": args.thinking},
-        report_to="none",
+        report_to="none",  # ResearchLog owns W&B logging
         model_init_kwargs={"dtype": "bfloat16"},
     )
     if args.init_adapter:  # warm-started adapter: pass a PeftModel, no new peft_config
@@ -578,10 +588,11 @@ def main():
     trainer = trainer_cls(
         model=model, **extra,
         reward_funcs=reward,
+        callbacks=[logger],
         args=config,
         train_dataset=dataset,
         peft_config=None if args.init_adapter else LoraConfig(r=args.lora_rank, lora_alpha=args.lora_rank, target_modules="all-linear", task_type="CAUSAL_LM"),
-        rollout_func=rollout_decoupled if args.decoupled else rollout_precommit if args.precommit != "none" else rollout_budget if args.think_budget else rollout if K > 1 else None,
+        rollout_func=record_rollout(rollout_decoupled if args.decoupled else rollout_precommit if args.precommit != "none" else rollout_budget if args.think_budget else rollout if K > 1 else None),
     )
     if args.debug_resume:
         debug_resume(trainer, ckpts[-1], list(tasks.values())[:32], env, tok, args)
