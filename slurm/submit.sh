@@ -1,5 +1,5 @@
 #!/bin/bash
-# Submit both comparisons and their warm-ups; every allocation is 1 x a100l on long.
+# Submit on long: one a100l per job, plus a dedicated GPU for monitored runs.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 ROOT="$SCRATCH/predictive-contracts"
@@ -8,10 +8,12 @@ export SOURCE_ARCHIVE="$ROOT/source-$(date +%Y%m%d-%H%M%S).tar"
 tar cf "$SOURCE_ARCHIVE" --exclude=__pycache__ contract slurm
 submit() {
     local name=$1 dependency=$2; shift 2
+    local gpus=1
+    if [ "$1" = monitor ]; then gpus=2; fi
     local deps=()
     if [ -n "$dependency" ]; then deps=(--dependency="afterok:$dependency"); fi
     local id
-    id=$(sbatch --parsable --job-name="pc_$name" --output="$ROOT/logs/%x_%j.out" \
+    id=$(sbatch --parsable --gres="gpu:a100l:$gpus" --job-name="pc_$name" --output="$ROOT/logs/%x_%j.out" \
         "${deps[@]}" slurm/job.sbatch "$name" "$@")
     printf '%s\t%s\t%s\n' "$name" "$id" "$dependency" >> "$ROOT/jobs.tsv"
     echo "$id"
