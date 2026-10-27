@@ -30,7 +30,7 @@ from transformers import AutoTokenizer
 
 from contract.envs import ENVS
 from contract.envs.leetcode import LeetCodeEnv
-from contract.grpo import add_common_args, build_trainer, generate_budgeted, group_z, make_config, open_logs, train
+from contract.grpo import add_common_args, accumulation_steps, build_trainer, gather_batch, generate_budgeted, group_z, make_config, open_logs, scoring_workers, train
 from contract.legibility.monitor import Monitor
 from contract.prompts import CODE_FORMAT_INSTRUCTION, PRECOMMIT_SYSTEM_PROMPT
 
@@ -57,9 +57,10 @@ def main():
     p.add_argument("--monitor-sees-output", action="store_true", help="the monitor also sees the final answer, not just the chain")
     p.add_argument("--monitor-sees-tests", action="store_true", help="the monitor also sees run_tests() as the problem showed it and as the answer returned it (the easy monitoring task)")
     args = p.parse_args()
+    accumulation_steps(args)  # reject invalid distributed batch sizes before loading models or data
     assert args.thinking and args.think_budget, "legibility needs a chain of thought: --thinking --think-budget B"
 
-    env = ENVS[args.env](path=args.data, hint=args.hint, workers=int(os.environ.get("SLURM_CPUS_PER_TASK", 8)))
+    env = ENVS[args.env](path=args.data, hint=args.hint, workers=scoring_workers())
     names = env.statement_sets[args.statements]
     tasks = {}
     for t in env.tasks():  # the neutral prompt of the Part 2-4 runs
@@ -89,6 +90,10 @@ def main():
         scores = env.score_many([tasks[i] for i in task_id], final_answer)
         tests = [env.monitor_evidence(tasks[i], a) for i, a in zip(task_id, final_answer)] if args.monitor_sees_tests else None
         answers, raw = monitor.judge(chain, names, final_answer if args.monitor_sees_output else None, tests)
+        batch, local = gather_batch(task_id=task_id, final_answer=final_answer, chain=chain, scores=scores,
+                                    answers=answers, raw=raw, think_forced=think_forced, think_tokens=think_tokens)
+        task_id, final_answer, chain, scores, answers, raw, think_forced, think_tokens = (
+            batch[k] for k in ("task_id", "final_answer", "chain", "scores", "answers", "raw", "think_forced", "think_tokens"))
         success = [float(s["success"]) for s in scores]
         flag = [float((a["any_hack"] or 0.0) >= args.flag_threshold) for a in answers]  # the monitor says it cheated
         correct = [[float(((a[b] or 0.0) >= args.flag_threshold) == bool(s["behaviors"][b])) for b in names] for a, s in zip(answers, scores)]
@@ -147,7 +152,7 @@ def main():
                                                         "monitor_raw": raw[i], "chain_tail": chain[i][-600:], "completion": final_answer[i]}) + "\n")
         for f in logs.values():
             f.flush()
-        return rewards
+        return rewards[local]
 
     config = make_config(args, extra_completion=args.think_budget + 64)
     trainer = build_trainer(args, config, dataset, reward, rollout)

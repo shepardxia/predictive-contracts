@@ -36,7 +36,6 @@ the reward is computed from the final attempt.  This uses TRL's experimental `ro
 """
 import argparse
 import collections
-import glob
 import json
 import math
 import os
@@ -53,7 +52,7 @@ from contract.envs import ENVS
 from contract.envs.leetcode import LeetCodeEnv
 from contract.prompts import CODE_FORMAT_INSTRUCTION, PRECOMMIT_SYSTEM_PROMPT, RETRY_MESSAGE, THINK_BUDGET_STOP
 from contract.commitment.prompts import COMMIT_THINK_BUDGET_STOP, PRECOMMIT_QUESTIONS, SOLVE_MESSAGE, commit_messages as make_commit_messages
-from contract.grpo import generate_budgeted
+from contract.grpo import accumulation_steps, gather_batch, generate_budgeted, open_logs, scoring_workers
 from contract.run_tasks import parse_precommit
 
 
@@ -137,9 +136,10 @@ def main():
                         "against the saved file, sync to vLLM, and compare generation quality before/after on training prompts")
     p.add_argument("--out", required=True)
     args = p.parse_args()
+    grad_accum = accumulation_steps(args, 2 if args.decoupled else 1)
     os.makedirs(args.out, exist_ok=True)
 
-    env = ENVS[args.env](path=args.data, hint=args.hint, workers=int(os.environ.get("SLURM_CPUS_PER_TASK", 8)))
+    env = ENVS[args.env](path=args.data, hint=args.hint, workers=scoring_workers())
     tasks = {t.id: t for t in env.tasks()}
     behavior_names = env.statement_sets[args.statements]
     if args.neutral_system_prompt and args.precommit == "none":
@@ -164,7 +164,7 @@ def main():
 
     # Off-policy commitment proposals: a buffer of recent outcomes and a prompt paragraph of similar examples.
     buffer = collections.deque()  # {"call", "task_id", "earns_reward", "any_hack"} for every rollout of the last --buffer-steps steps
-    rng = random.Random(args.seed)  # epsilon-exploration of commitments (--force-eps)
+    rng = random.Random(args.seed + int(os.environ.get("RANK", 0)))  # independent epsilon exploration per rank
     if args.offpolicy_commit:
         emb = np.load(args.embeddings)
         E = {str(i): x / np.linalg.norm(x) for i, x in zip(emb["ids"], emb["X"])}
@@ -196,17 +196,10 @@ def main():
 
     # Resume bookkeeping: continue the step counter from the latest checkpoint and drop log lines written
     # after it (a pre-empted job may have logged steps it never saved), so the logs read as one run.
-    ckpts = sorted(glob.glob(f"{args.out}/checkpoint-*"), key=lambda c: int(c.rsplit("-", 1)[1]))
-    resume_step = int(ckpts[-1].rsplit("-", 1)[1]) if ckpts else 0
-    for name in ("reward_log", "hack_examples", "rollouts"):
-        path = f"{args.out}/{name}.jsonl"
-        if os.path.exists(path):
-            lines = [l for l in open(path) if json.loads(l)["call"] <= resume_step]
-            open(path, "w").writelines(lines)
-    log = open(f"{args.out}/reward_log.jsonl", "a")
-    examples = open(f"{args.out}/hack_examples.jsonl", "a")  # every rollout that touched the loophole
-    rollouts = open(f"{args.out}/rollouts.jsonl", "a")  # one line per rollout: step, task, label, reward (for group-level analysis)
-    commit_samples = open(f"{args.out}/commit_samples.jsonl", "a") if args.commit_thinking else None  # a few raw thinking commitments per step
+    names = ("reward_log", "hack_examples", "rollouts") + (("commit_samples",) if args.commit_thinking else ())
+    logs, ckpts, resume_step = open_logs(args.out, names)
+    log, examples, rollouts = (logs[n] for n in ("reward_log", "hack_examples", "rollouts"))
+    commit_samples = logs.get("commit_samples")
     step = {"n": resume_step}
 
     def group_z(values):
@@ -235,6 +228,12 @@ def main():
         else:  # with thinking on, the completion is "<think>...</think>answer"; score only the answer part
             answers = [c[0]["content"].split("</think>")[-1] for c in completions]
         scores = env.score_many([tasks[i] for i in task_id], answers)
+        batch, local = gather_batch(task_id=task_id, answers=answers, scores=scores,
+                                    completions=completions, commit_answers=commit_answers,
+                                    **{k: kwargs[k] for k in ("n_attempts", "n_examples", "think_forced", "think_tokens", "forced") if k in kwargs})
+        task_id, answers, scores, completions, commit_answers = (batch.pop(k) for k in
+                                                               ("task_id", "answers", "scores", "completions", "commit_answers"))
+        kwargs = batch
         if commit_answers is not None:  # Part 3: task (0/1) + consistency
             cons = [consistency(p, s["behaviors"]) for p, s in zip(commit_answers, scores)]
             task = [float(s["success"]) for s in scores]
@@ -278,19 +277,30 @@ def main():
                 examples.write(json.dumps({"call": step["n"], "task_id": task_id[i], "label": s["label"],
                                            "test_modification": s["test_modification"], "completion": answers[i]}) + "\n")
         examples.flush()
-        return rewards
+        return rewards[local]
 
     def reward_decoupled(completions, task_id, final_answer, commit_answers, role, extra):
         """Blocks of 2G entries per problem: G attempts (task reward, z within the G) then G commitments
         (1 - mean squared error against the attempts' mean behaviors, z within the G).  `extra` holds the
         rollout's other fields (thinking-budget stats, attempts only)."""
         G = args.num_generations
+        att = [i for i, r in enumerate(role) if r == "attempt"]
+        scores = env.score_many([tasks[task_id[i]] for i in att], [final_answer[i] for i in att])
+        scored = [None] * len(role)
+        for i, s in zip(att, scores):
+            scored[i] = s
+        batch, local = gather_batch(task_id=task_id, final_answer=final_answer, commit_answers=commit_answers,
+                                    role=role, scored=scored,
+                                    **{k: extra[k] for k in ("think_forced", "think_tokens") if k in extra})
+        task_id, final_answer, commit_answers, role, scored = (batch.pop(k) for k in
+                                                            ("task_id", "final_answer", "commit_answers", "role", "scored"))
+        extra = batch
         rewards, stats = [0.0] * len(role), collections.defaultdict(list)
         blocks = []  # (attempt indices, scores, mean commitment) per problem, for the match term below
         for b in range(0, len(role), 2 * G):
             att = [i for i in range(b, b + 2 * G) if role[i] == "attempt"]
             com = [i for i in range(b, b + 2 * G) if role[i] == "commit"]
-            scores = env.score_many([tasks[task_id[i]] for i in att], [final_answer[i] for i in att])
+            scores = [scored[i] for i in att]
             target = {n: sum(float(s["behaviors"][n]) for s in scores) / len(scores) for n in behavior_names}
             task = [float(s["success"]) for s in scores]
             cons = [1.0 - sum((1.0 if p is None else (float(p) - target[n]) ** 2) for p, n in zip(commit_answers[i], behavior_names)) / len(behavior_names) for i in com]
@@ -356,7 +366,7 @@ def main():
                 com = [i for i in range(b, b + 2 * G) if role[i] == "commit"]
                 for i, z in zip(com, group_z([rewards[i] for i in com])):
                     rewards[i] = z
-        step["last_rewards"] = list(rewards)  # DecoupledTrainer installs these as the advantages when commit_norm == "batch"
+        step["last_rewards"] = rewards[local]  # DecoupledTrainer installs this rank's advantages
         step["n"] += 1
         m = lambda xs: sum(xs) / len(xs)
         log.write(json.dumps({"call": step["n"], "mean_reward": m(rewards), "labels": dict(collections.Counter(stats["labels"])),
@@ -371,7 +381,7 @@ def main():
                               **({"think_forced_fraction": m([extra["think_forced"][i] for i in att_all]),
                                   "mean_think_tokens": m([extra["think_tokens"][i] for i in att_all])} if "think_forced" in extra else {})}) + "\n")
         log.flush(); rollouts.flush(); examples.flush()
-        return rewards
+        return rewards[local]
 
     task_by_prompt = {t.messages[-1]["content"]: t for t in tasks.values()}
 
@@ -526,7 +536,7 @@ def main():
         max_grad_norm=1.0,
         beta=args.beta,
         per_device_train_batch_size=args.per_device_batch,
-        gradient_accumulation_steps=args.num_prompts * args.num_generations * (2 if args.decoupled else 1) // args.per_device_batch,
+        gradient_accumulation_steps=grad_accum,
         num_generations=args.num_generations * (2 if args.decoupled else 1),  # decoupled: G attempts + G commitments per problem
         max_completion_length=K * (args.max_completion_length + 64) + extra_budget,  # whole-episode budget; per call set in the rollouts
         vllm_max_model_length=args.max_prompt_length + 400 + K * (args.max_completion_length + 64) + extra_budget,
@@ -545,6 +555,7 @@ def main():
         gradient_checkpointing=True,
         use_vllm=True,
         vllm_mode="colocate",
+        vllm_tensor_parallel_size=1,
         vllm_gpu_memory_utilization=args.vllm_gpu_mem,
         vllm_enable_sleep_mode=args.vllm_sleep,
         vllm_group_port=int(os.environ.get("VLLM_GROUP_PORT", 51216)),  # set per job in train.sbatch

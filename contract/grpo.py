@@ -16,10 +16,43 @@ import glob
 import json
 import os
 
+from accelerate.utils import gather_object
 from peft import LoraConfig
 from trl import GRPOConfig, GRPOTrainer
 
 from contract.prompts import THINK_BUDGET_STOP
+
+
+def accumulation_steps(args, episodes_per_problem=1):
+    """Keep --num-prompts global, with whole problem groups on each training rank."""
+    world = int(os.environ.get("WORLD_SIZE", 1))
+    batch = args.num_prompts * args.num_generations * episodes_per_problem
+    microbatch = args.per_device_batch * world
+    if args.num_prompts <= 0 or args.num_prompts % world:
+        raise ValueError("--num-prompts must be positive and divisible by the number of training GPUs")
+    if microbatch <= 0 or batch < microbatch or batch % microbatch:
+        raise ValueError("the global rollout batch must be divisible by --per-device-batch * training GPUs")
+    return batch // microbatch
+
+
+def scoring_workers():
+    """Share the job's CPU allocation among local training processes."""
+    return max(1, int(os.environ.get("SLURM_CPUS_PER_TASK", 8)) // int(os.environ.get("LOCAL_WORLD_SIZE", 1)))
+
+
+def gather_batch(**columns):
+    """Gather scored rows before reward math; return the global columns and this rank's slice.
+
+    Generation, code execution and monitoring stay local. Cheap reward calculations run on the
+    full batch so normalization, running statistics and logs retain their single-GPU meaning.
+    Optional columns may be None; all other columns have one entry per local rollout.
+    """
+    batches = gather_object([columns])
+    sizes = [len(next(v for v in b.values() if v is not None)) for b in batches]
+    rank = int(os.environ.get("RANK", 0))
+    start = sum(sizes[:rank])
+    merged = {k: None if v is None else [x for b in batches for x in b[k]] for k, v in columns.items()}
+    return merged, slice(start, start + sizes[rank])
 
 
 def add_common_args(p):
@@ -90,6 +123,9 @@ def open_logs(out, names=("reward_log", "rollouts", "hack_examples")):
     resume_step = int(ckpts[-1].rsplit("-", 1)[1]) if ckpts else 0
     files = {}
     for name in names:
+        if int(os.environ.get("RANK", 0)) != 0:
+            files[name] = open(os.devnull, "w")
+            continue
         path = f"{out}/{name}.jsonl"
         if os.path.exists(path):
             lines = [l for l in open(path) if json.loads(l)["call"] <= resume_step]
@@ -113,7 +149,7 @@ def make_config(args, episodes_per_problem=1, extra_completion=0, scale_rewards=
         max_grad_norm=1.0,
         beta=args.beta,
         per_device_train_batch_size=args.per_device_batch,
-        gradient_accumulation_steps=args.num_prompts * args.num_generations * episodes_per_problem // args.per_device_batch,
+        gradient_accumulation_steps=accumulation_steps(args, episodes_per_problem),
         num_generations=args.num_generations * episodes_per_problem,
         max_completion_length=budget,  # whole-episode budget; the rollouts set per-call lengths themselves
         vllm_max_model_length=args.max_prompt_length + 400 + budget,
@@ -132,6 +168,7 @@ def make_config(args, episodes_per_problem=1, extra_completion=0, scale_rewards=
         gradient_checkpointing=True,
         use_vllm=True,
         vllm_mode="colocate",
+        vllm_tensor_parallel_size=1,  # independent generation engines; each rank owns whole problem groups
         vllm_gpu_memory_utilization=args.vllm_gpu_mem,
         vllm_enable_sleep_mode=args.vllm_sleep,
         vllm_group_port=int(os.environ.get("VLLM_GROUP_PORT", 51216)),  # set per job in train.sbatch

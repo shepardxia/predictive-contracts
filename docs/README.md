@@ -292,7 +292,29 @@ LORA=runs/<name>/checkpoint-200 sbatch scripts/serve_and_run.sbatch bash -c "ven
 python docs/commitment/make_results_page.py
 ```
 
-Scaling notes for a larger model or more GPUs: everything model-specific sits in three places -- the
+Single-node multi-GPU GRPO uses one training process and one colocated vLLM engine per training GPU.
+The existing commands work unchanged; request more GPUs in SLURM:
+
+```bash
+# Two training GPUs (commitment/plain RL)
+sbatch --gpus=2 scripts/train.sbatch venv_train/bin/python -m contract.train_grpo --out runs/two_gpu ...
+# Two training GPUs plus one frozen monitor GPU
+sbatch --gpus=3 scripts/train_legibility.sbatch venv_train/bin/python -m contract.legibility.train --out runs/two_gpu_legible ...
+# Without SLURM
+torchrun --standalone --nproc-per-node=2 -m contract.train_grpo --out runs/two_gpu ...
+```
+
+`--num-prompts` remains the **global** number of problems per step and must be divisible by the
+number of training GPUs. The global rollout count must also divide evenly into
+`--per-device-batch * training GPUs`; invalid sizes fail before model loading. Whole problem groups
+stay on one GPU. Scoring and monitoring run locally, then scored rows are gathered before reward
+calculation, preserving batch normalization, class thresholds, the match EMA and the off-policy
+example buffer. Rank zero writes the combined logs; CPU scoring workers share the job's CPU budget.
+The existing checkpoint resume behavior is retained (including resetting the match EMA on restart).
+`TRAIN_GPUS` can limit how many allocated GPUs train; legibility reserves the last visible GPU for
+its monitor. These batch guarantees cover the GRPO trainers, not the separate SFT/OPSD warm-ups.
+
+Scaling notes for a larger model: everything model-specific sits in three places -- the
 `<think>` markers and stop sentences (`prompts.THINK_BUDGET_STOP`, `COMMIT_THINK_BUDGET_STOP`, used by
 `generate_budgeted` and `llm.chat_budgeted`), `enable_thinking` in the chat-template calls, and the
 `<|im_end|>` / pad token ids read from the tokenizer. `--per-device-batch`, `--vllm-gpu-mem` and the

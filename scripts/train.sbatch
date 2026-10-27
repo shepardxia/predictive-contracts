@@ -2,6 +2,7 @@
 #
 # GRPO training job.  Usage:
 #   sbatch --time=HH:MM:SS scripts/train.sbatch venv_train/bin/python -m contract.train_grpo --out runs/x ...
+#   sbatch --gpus=2 scripts/train.sbatch venv_train/bin/python -m contract.train_grpo --out runs/x ...
 #
 #SBATCH --job-name=contract_train
 #SBATCH --account=lingo
@@ -12,6 +13,8 @@
 #SBATCH --output=/data/scratch-oc40/jda/contract/logs/%x_%j.log
 #SBATCH --error=/data/scratch-oc40/jda/contract/logs/%x_%j.err
 #SBATCH --gpus=1
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=96G
 #SBATCH --open-mode=append
@@ -33,4 +36,9 @@ export VLLM_USE_FLASHINFER_SAMPLER=0
 # Job-specific ports so that several training jobs can share the node.
 export MASTER_PORT=$((30000 + SLURM_JOB_ID % 10000))
 export VLLM_GROUP_PORT=$((40000 + SLURM_JOB_ID % 10000))
-"$@"
+TRAIN_GPUS=${TRAIN_GPUS:-${SLURM_GPUS_ON_NODE:-1}}
+if (( TRAIN_GPUS > 1 )); then
+    venv_train/bin/python -m torch.distributed.run --standalone --nnodes=1 --nproc-per-node="$TRAIN_GPUS" --no-python "$@"
+else
+    "$@"
+fi
