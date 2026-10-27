@@ -148,7 +148,9 @@ environment archive, data, prepared traces, runs and logs. Prepare on the login 
 `bash slurm/setup.sh`, then `bash slurm/submit.sh`. The environment pins the user's TRL fork at
 `900a473c6575804152839d877f4af1034c212f85`; prefix packing remains at its default setting.
 
-Every job requests **2 x a100l, 16 CPUs, 96 GB RAM, 7 days on `long`, with requeue**. Submission takes
+Jobs default to **2 x a100l, 16 CPUs, 96 GB RAM, 7 days on `long`, with requeue**. When `main` has
+free quota, eligible pending jobs can move there with 8 CPUs, 48 GB RAM and a 5-day limit, retaining
+their job IDs and dependencies. `main` allows only 2 GPUs per user across all jobs. Submission takes
 a source snapshot; each job stages that snapshot and the packed venv onto node-local storage. The
 six 200-step, seed-1 GRPO runs use 16 problems x 16 generations globally, a 4096-token thinking budget,
 1536 answer tokens and checkpoints every 10 steps:
