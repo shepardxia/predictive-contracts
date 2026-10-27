@@ -37,6 +37,15 @@ mitigates hacking relative to baseline behavior.
 
 ## Environment
 
+Active runs use **Mila**, user `xiash`, via `ssh mila`. Follow `~/.claude/MILA.md` for cluster
+operations. Code lives in `~/predictive-contracts`; environments, data, checkpoints and logs live in
+`$SCRATCH/predictive-contracts`. `slurm/setup.sh` prepares the environment and data on the login node.
+`slurm/submit.sh` submits both comparisons and their prerequisites, all on `long`, 2 x `a100l` per job,
+with requeue and checkpoint resume. Jobs stage the environment and a submitted source snapshot into
+`$SLURM_TMPDIR`. Monitor runs reserve one of their two GPUs for the frozen monitor.
+
+The CSAIL instructions below describe the upstream project's deployment and historical results.
+
 You have access to a SLURM cluster via `slurm-login.csail.mit.edu`.
 
 **Important**: the ssh connection to the cluster (via the `mfa-jump` host) can be

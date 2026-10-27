@@ -94,6 +94,9 @@ def train(args):
     from datasets import Dataset
     from peft import LoraConfig
     from trl import SFTConfig, SFTTrainer
+    from contract.grpo import open_logs
+    from contract.logging import ResearchLog
+    logs, ckpts, _ = open_logs(args.out)
     tok = AutoTokenizer.from_pretrained(args.model)
     rows = []
     for r in map(json.loads, open(args.traces)):
@@ -103,12 +106,12 @@ def train(args):
     lens = [len(tok(r["completion"])["input_ids"]) for r in rows[:200]]
     print(f"{len(rows)} traces; completion length (first 200): mean {sum(lens) / len(lens):.0f} tokens, max {max(lens)}", flush=True)
     config = SFTConfig(output_dir=args.out, num_train_epochs=args.epochs, learning_rate=args.lr, lr_scheduler_type="cosine",
-                       warmup_steps=10, per_device_train_batch_size=4, gradient_accumulation_steps=4, bf16=True,
-                       max_length=4096, logging_steps=5, save_strategy="no", report_to="none", gradient_checkpointing=True,
+                       warmup_steps=10, per_device_train_batch_size=4, gradient_accumulation_steps=4 // int(os.environ.get("WORLD_SIZE", 1)), bf16=True,
+                       max_length=4096, logging_steps=1, save_steps=10, save_total_limit=2, report_to="none", gradient_checkpointing=True,
                        model_init_kwargs={"dtype": "bfloat16"})
-    trainer = SFTTrainer(model=args.model, args=config, train_dataset=Dataset.from_list(rows),
+    trainer = SFTTrainer(model=args.model, args=config, train_dataset=Dataset.from_list(rows), callbacks=[ResearchLog(args, logs)],
                          peft_config=LoraConfig(r=args.lora_rank, lora_alpha=args.lora_rank, target_modules="all-linear", task_type="CAUSAL_LM"))
-    trainer.train()
+    trainer.train(resume_from_checkpoint=ckpts[-1] if ckpts else None)
     trainer.save_model(f"{args.out}/final")
     print("saved adapter to", f"{args.out}/final")
 

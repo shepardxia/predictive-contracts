@@ -143,7 +143,32 @@ results/  -> symlink to ~/code_nobackup/contract/results (outside Dropbox): ever
   legibility/             monitor/ (monitor evaluations), leetcode/, runs/
 ```
 
-Cluster side: `/data/scratch-oc40/jda/contract` holds a copy of `contract/`, `scripts/`, `data/`, a
+Mila deployment uses `~/predictive-contracts` for code and `$SCRATCH/predictive-contracts` for the
+environment archive, data, prepared traces, runs and logs. Prepare on the login node with
+`bash slurm/setup.sh`, then `bash slurm/submit.sh`. The environment pins the user's TRL fork at
+`900a473c6575804152839d877f4af1034c212f85`; prefix packing remains at its default setting.
+
+Every job requests **2 x a100l, 16 CPUs, 96 GB RAM, 7 days on `long`, with requeue**. Submission takes
+a source snapshot; each job stages that snapshot and the packed venv onto node-local storage. The
+six 200-step, seed-1 GRPO runs use 16 problems x 16 generations globally, a 4096-token thinking budget,
+1536 answer tokens and checkpoints every 10 steps:
+
+- Commitment comparison: task-only from the base model; decoupled commitments; decoupled commitments
+  plus agreement. The latter two share the jittered reasoning-commitment distillation warm-up.
+- Legibility comparison: task-only, monitor penalty, and legibility reward, all from the same hacking
+  warm-up (window + answer loss, 3 epochs, learning rate 3e-5). The two monitored runs use one GPU for
+  the policy and one for the chain-only Qwen3-4B monitor, at threshold 0.1. Other GRPO runs train on both GPUs.
+
+Three prerequisite jobs generate base-model training transcripts and probe targets, then independently
+prepare the commitment and hacking adapters. SLURM `afterok` dependencies hold the five dependent
+training jobs until their adapters are ready; the base task-only control can start immediately.
+Base transcript generation appends completed chunks and resumes missing samples. Both SFT warm-ups
+checkpoint every 10 steps and retain the same global batch on two GPUs. Trace files are published only
+when sampling finishes, so preemption cannot turn a partial warm-up dataset into a completed one.
+Job IDs are recorded in `$SCRATCH/predictive-contracts/jobs.tsv`; training output is in
+`runs/<name>/run.log`, with full GRPO metrics and rollouts in W&B.
+
+Historical CSAIL deployment: `/data/scratch-oc40/jda/contract` holds a copy of `contract/`, `scripts/`, `data/`, a
 Python 3.10 venv with vLLM 0.28 for serving (`venv`), a second venv for training (`venv_train`, TRL 1.12
 pins vLLM 0.27), the HF cache with `Qwen/Qwen3-4B` (`HF_HOME` must be on scratch), `logs/`, `runs/`
 (training outputs: checkpoints, `reward_log.jsonl`, `rollouts.jsonl`) and `results/`. Downloads happen

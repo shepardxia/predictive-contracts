@@ -71,6 +71,7 @@ def main():
     p.add_argument("--limit", type=int, default=None, help="only the first N tasks (debugging)")
     p.add_argument("--data", default=None, help="problem file (default: the env's test split)")
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--resume", action="store_true", help="append missing (task, sample) transcripts to --out")
     p.add_argument("--out", required=True)
     args = p.parse_args()
 
@@ -86,6 +87,19 @@ def main():
         for k in range(args.n):
             transcripts.append({"task_id": t.id, "sample": k, "meta": t.meta, "messages": list(t.messages), "attempts": []})
     task_by_id = {t.id: t for t in tasks}
+    done = set()
+    if args.resume and os.path.exists(args.out):
+        with open(args.out, "rb+") as f:
+            for line in f:
+                if not line.endswith(b"\n"):
+                    f.truncate(f.tell() - len(line))
+                    break
+                r = json.loads(line)
+                done.add((r["task_id"], r["sample"]))
+        transcripts = [tr for tr in transcripts if (tr["task_id"], tr["sample"]) not in done]
+        print(f"resuming: {len(done)} transcripts complete, {len(transcripts)} remain", flush=True)
+    if not transcripts:
+        return
 
     if args.neutral_system_prompt and args.precommit == "none":
         for tr in transcripts:
@@ -119,32 +133,32 @@ def main():
         print(f"pre-commitment: {parsed}/{len(transcripts)} fully parsed", flush=True)
 
     live = list(range(len(transcripts)))
-    for attempt in range(args.max_attempts):
-        print(f"attempt {attempt + 1}: {len(live)} transcripts", flush=True)
-        outs = llm.chat_many([transcripts[i]["messages"] for i in live], n=1)
-        responses = [o[0] for o in outs]
-        scores = env.score_many([task_by_id[transcripts[i]["task_id"]] for i in live], [r["content"] for r in responses])
-        still_live = []
-        for i, r, s in zip(live, responses, scores):
-            tr = transcripts[i]
-            tr["messages"].append({"role": "assistant", "content": r["content"]})
-            tr["attempts"].append({**s, "reasoning": r["reasoning"], "finish_reason": r["finish_reason"], "think_forced": r.get("think_forced", False)})
-            if not s["success"] and attempt + 1 < args.max_attempts:
-                tr["messages"].append({"role": "user", "content": RETRY_MESSAGE})
-                still_live.append(i)
-        live = still_live
-        n_ok = sum(tr["attempts"][-1]["success"] for tr in transcripts if len(tr["attempts"]) == attempt + 1)
-        print(f"  reward earned on this attempt: {n_ok}", flush=True)
-        if not live:
-            break
-
-    for tr in transcripts:
-        tr["final"] = tr["attempts"][-1]
-        tr["n_attempts"] = len(tr["attempts"])
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
-    with open(args.out, "w") as f:
-        for tr in transcripts:
-            f.write(json.dumps(tr) + "\n")
+    with open(args.out, "a" if args.resume else "w") as f:
+        for attempt in range(args.max_attempts):
+            print(f"attempt {attempt + 1}: {len(live)} transcripts", flush=True)
+            still_live = []
+            for start in range(0, len(live), llm.workers):
+                chunk = live[start:start + llm.workers]
+                outs = llm.chat_many([transcripts[i]["messages"] for i in chunk], n=1)
+                responses = [o[0] for o in outs]
+                scores = env.score_many([task_by_id[transcripts[i]["task_id"]] for i in chunk], [r["content"] for r in responses])
+                for i, r, s in zip(chunk, responses, scores):
+                    tr = transcripts[i]
+                    tr["messages"].append({"role": "assistant", "content": r["content"]})
+                    tr["attempts"].append({**s, "reasoning": r["reasoning"], "finish_reason": r["finish_reason"], "think_forced": r.get("think_forced", False)})
+                    if not s["success"] and attempt + 1 < args.max_attempts:
+                        tr["messages"].append({"role": "user", "content": RETRY_MESSAGE})
+                        still_live.append(i)
+                    else:
+                        tr["final"] = tr["attempts"][-1]
+                        tr["n_attempts"] = len(tr["attempts"])
+                        f.write(json.dumps(tr) + "\n")
+                f.flush()
+                print(f"  scored {min(start + len(chunk), len(live))}/{len(live)}", flush=True)
+            live = still_live
+            if not live:
+                break
     print(f"wrote {len(transcripts)} transcripts to {args.out}")
 
 
