@@ -40,12 +40,12 @@ mitigates hacking relative to baseline behavior.
 Active runs use **Mila**, user `xiash`, via `ssh mila`. Follow `~/.claude/MILA.md` for cluster
 operations. Code lives in `~/predictive-contracts`; environments, data, checkpoints and logs live in
 `$SCRATCH/predictive-contracts`. `slurm/setup.sh` prepares the environment and data on the login node.
-`slurm/submit.sh` submits both comparisons and their prerequisites, defaulting to `long`, 2 x `a100l` per job,
+`slurm/submit.sh` submits both comparisons and their prerequisites on `long`, 1 x `a100l` per job,
 with requeue and checkpoint resume. Jobs stage the environment and a submitted source snapshot into
-`$SLURM_TMPDIR`. Monitor runs reserve one of their two GPUs for the frozen monitor.
-Use `main` when the user's quota is free and the job fits: 2 GPUs, 8 CPUs, 48 GB RAM total per user,
-and a 5-day time limit. Move pending jobs with `scontrol update` to preserve their dependencies;
-prioritize prerequisites that unlock the other runs. Leave healthy running jobs alone.
+`$SLURM_TMPDIR`. Monitor runs share the GPU between the policy and frozen monitor, reserving 20%
+of device memory for the monitor. The current instruction is one GPU per job on `long`, including
+preparation; this supersedes the earlier use of `main`. Leave healthy running jobs alone unless
+the user requests a move.
 
 The CSAIL instructions below describe the upstream project's deployment and historical results.
 

@@ -1,5 +1,5 @@
 #!/bin/bash
-# Submit both comparisons and their warm-ups; every allocation is 2 x a100l on long.
+# Submit both comparisons and their warm-ups; every allocation is 1 x a100l on long.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 ROOT="$SCRATCH/predictive-contracts"

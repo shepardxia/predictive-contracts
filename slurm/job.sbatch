@@ -1,7 +1,7 @@
 #!/bin/bash
 # Usage: sbatch slurm/job.sbatch <run-name> <stage> [stage arguments]
 #SBATCH --partition=long
-#SBATCH --gres=gpu:a100l:2
+#SBATCH --gres=gpu:a100l:1
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=16
