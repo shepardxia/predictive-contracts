@@ -76,7 +76,7 @@ class ResearchLog(TrainerCallback):
             project=previous.get("project", os.environ.get("WANDB_PROJECT", "predictive-contracts")),
             entity=previous.get("entity") or os.environ.get("WANDB_ENTITY"),
             name=os.environ.get("WANDB_NAME", Path(args.out).name),
-            id=previous.get("id", os.environ.get("WANDB_RUN_ID") or wandb.util.generate_id()),
+            id=previous.get("id") or os.environ.get("WANDB_RUN_ID"),
             resume="allow", dir=args.out, config=vars(args),
         )
         identity.write_text(json.dumps({"id": self.run.id, "project": self.run.project,

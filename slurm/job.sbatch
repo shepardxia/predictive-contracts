@@ -29,12 +29,16 @@ export PYTORCH_ALLOC_CONF=expandable_segments:True
 export VLLM_USE_FLASHINFER_SAMPLER=0
 export VENV="$SLURM_TMPDIR/venv"
 export OUT="$RUN_ROOT/runs/$RUN_NAME"
-mkdir -p "$VENV" "$OUT"
-tar xf "$RUN_ROOT/venv.tar" -C "$VENV"
-mkdir -p "$SLURM_TMPDIR/code"
-tar xf "$SOURCE_ARCHIVE" -C "$SLURM_TMPDIR/code"
-export PROJECT_ROOT="$SLURM_TMPDIR/code"
+mkdir -p "$OUT"
 printf '%s\n' "$SOURCE_ARCHIVE" > "$OUT/source_archive"
 export PATH="$VENV/bin:$PATH"
 cd "$PROJECT_ROOT"
-exec srun --gres-flags=allow-task-sharing bash slurm/run.sh "$@" >> "$OUT/run.log" 2>&1
+# Mila gives each Slurm step its own /tmp; stage inside the step that uses it.
+exec srun --gres-flags=allow-task-sharing bash -c '
+    set -euo pipefail
+    mkdir -p "$VENV" "$SLURM_TMPDIR/code"
+    tar xf "$RUN_ROOT/venv.tar" -C "$VENV"
+    tar xf "$SOURCE_ARCHIVE" -C "$SLURM_TMPDIR/code"
+    cd "$SLURM_TMPDIR/code"
+    exec bash slurm/run.sh "$@"
+' bash "$@" >> "$OUT/run.log" 2>&1

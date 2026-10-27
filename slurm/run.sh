@@ -13,7 +13,7 @@ serve() {
     local devices=$1 tp=$2
     CUDA_VISIBLE_DEVICES="$devices" "$PY" -m vllm.entrypoints.openai.api_server \
         --model Qwen/Qwen3-4B --port "$PORT" --dtype bfloat16 --max-model-len 16384 \
-        --tensor-parallel-size "$tp" --gpu-memory-utilization 0.85 --enable-prefix-caching \
+        --tensor-parallel-size "$tp" --disable-custom-all-reduce --gpu-memory-utilization 0.85 --enable-prefix-caching \
         --reasoning-parser qwen3 --max-num-seqs 128 > "$OUT/server.log" 2>&1 &
     SERVER_PID=$!
     until curl -sf "http://localhost:$PORT/health" >/dev/null; do
