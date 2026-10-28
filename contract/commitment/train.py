@@ -95,6 +95,7 @@ def main():
     p.add_argument("--vllm-sleep", action="store_true", help="TRL vllm_enable_sleep_mode: vLLM offloads its weights and frees its KV cache during the "
                                                              "training step, so --vllm-gpu-mem can be raised to ~0.8")
     p.add_argument("--per-device-batch", type=int, default=4, help="sequences per backward pass (lower for long multi-attempt episodes)")
+    p.add_argument("--prefix-pack", action="store_true", help="use the TRL fork's shared-prompt packing and chunked log-probability passes")
     p.add_argument("--seed", type=int, default=1)
     p.add_argument("--offpolicy-commit", action="store_true",
                    help="sample the commitment turn from a proposal prompted with recent similar successes/failures; "
@@ -563,6 +564,8 @@ def main():
         logging_steps=1,
         bf16=True,
         gradient_checkpointing=True,
+        ddp_find_unused_parameters=False,
+        prefix_pack=args.prefix_pack,
         use_vllm=True,
         vllm_mode="colocate",
         vllm_tensor_parallel_size=1,

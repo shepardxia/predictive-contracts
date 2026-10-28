@@ -194,9 +194,9 @@ def train(args):
     print(f"{len(rows)} traces; sequence length: mean {sum(lens) / len(lens):.0f} tokens, max {max(lens)}; "
           f"loss on {sum(sum(r['completion_mask']) for r in rows) / sum(lens):.2f} of the tokens", flush=True)
     config = SFTConfig(output_dir=args.out, num_train_epochs=args.epochs, learning_rate=args.lr, lr_scheduler_type="cosine",
-                       warmup_steps=10, per_device_train_batch_size=1, gradient_accumulation_steps=16 // int(os.environ.get("WORLD_SIZE", 1)), bf16=True,
+                       warmup_steps=10, per_device_train_batch_size=4, gradient_accumulation_steps=4 // int(os.environ.get("WORLD_SIZE", 1)), bf16=True,
                        max_length=args.max_length, completion_only_loss=True, logging_steps=1, save_steps=10, save_total_limit=2, report_to="none",
-                       gradient_checkpointing=True, model_init_kwargs={"dtype": "bfloat16"})
+                       gradient_checkpointing=True, ddp_find_unused_parameters=False, model_init_kwargs={"dtype": "bfloat16"})
     trainer = SFTTrainer(model=args.model, args=config, train_dataset=Dataset.from_list(rows), callbacks=[ResearchLog(args, logs)],
                          peft_config=LoraConfig(r=args.lora_rank, lora_alpha=args.lora_rank, target_modules="all-linear", task_type="CAUSAL_LM"))
     trainer.train(resume_from_checkpoint=ckpts[-1] if ckpts else None)

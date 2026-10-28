@@ -73,6 +73,7 @@ def add_common_args(p):
     p.add_argument("--beta", type=float, default=1e-3, help="KL weight toward the initial policy (TRL adds a frozen 'ref' adapter)")
     p.add_argument("--lora-rank", type=int, default=32)
     p.add_argument("--per-device-batch", type=int, default=2, help="sequences per backward pass")
+    p.add_argument("--prefix-pack", action="store_true", help="use the TRL fork's shared-prompt packing and chunked log-probability passes")
     p.add_argument("--split-normalize", action="store_true", help="the reward function returns z-scored terms itself; TRL's group scaling is off")
     p.add_argument("--is-mode", default="token_truncate", help="TRL vllm_importance_sampling_mode (token_truncate; the default sequence_mask down-weights long completions)")
     p.add_argument("--mask-truncated", action="store_true", help="drop completions that hit the token cap from the loss (DAPO's overlong filtering)")
@@ -175,6 +176,8 @@ def make_config(args, episodes_per_problem=1, extra_completion=0, scale_rewards=
         logging_steps=1,
         bf16=True,
         gradient_checkpointing=True,
+        ddp_find_unused_parameters=False,
+        prefix_pack=args.prefix_pack,
         use_vllm=True,
         vllm_mode="colocate",
         vllm_tensor_parallel_size=1,  # independent generation engines; each rank owns whole problem groups

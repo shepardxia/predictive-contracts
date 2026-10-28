@@ -52,7 +52,7 @@ train() {
 
 COMMON=(--model Qwen/Qwen3-4B --data "$DATA" --hint modify_tests --thinking --think-budget 4096
         --num-prompts 16 --num-generations 16 --max-completion-length 1536 --max-steps 200
-        --save-steps 1 --per-device-batch 4 --split-normalize --is-mode token_truncate
+        --save-steps 1 --per-device-batch 8 --prefix-pack --split-normalize --is-mode token_truncate
         --mask-truncated --vllm-sleep --seed 1 --out "$OUT")
 
 case "$STAGE" in

@@ -47,6 +47,9 @@ RL checkpoints every step; completed base rollouts and warm-up teacher responses
 restart. Inference uses one full-model replica per GPU (TP=1), with 64 requests per replica;
 base rollout generation overlaps grading and keeps saving batches of 64. Unmonitored training
 uses four DDP ranks; monitored runs use two policy ranks and two independent monitor replicas.
+RL uses microbatch eight and prefix packing from the pinned TRL fork: eight accumulation steps
+for plain RL, sixteen for decoupled or monitored RL. Check W&B's packed-microbatch fraction,
+step time, and GPU memory before treating utilization as verified. SFT uses microbatch four.
 Serving logs are `server-0.log`, `server-1.log`, etc. Jobs stage the environment and a submitted source snapshot into
 `$SLURM_TMPDIR`. This supersedes the earlier `long` / `main` allocations. Leave healthy running
 jobs alone unless the user requests a move.

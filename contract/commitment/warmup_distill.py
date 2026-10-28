@@ -108,7 +108,7 @@ def train(args):
     config = SFTConfig(output_dir=args.out, num_train_epochs=args.epochs, learning_rate=args.lr, lr_scheduler_type="cosine",
                        warmup_steps=10, per_device_train_batch_size=4, gradient_accumulation_steps=4 // int(os.environ.get("WORLD_SIZE", 1)), bf16=True,
                        max_length=4096, logging_steps=1, save_steps=10, save_total_limit=2, report_to="none", gradient_checkpointing=True,
-                       model_init_kwargs={"dtype": "bfloat16"})
+                       ddp_find_unused_parameters=False, model_init_kwargs={"dtype": "bfloat16"})
     trainer = SFTTrainer(model=args.model, args=config, train_dataset=Dataset.from_list(rows), callbacks=[ResearchLog(args, logs)],
                          peft_config=LoraConfig(r=args.lora_rank, lora_alpha=args.lora_rank, target_modules="all-linear", task_type="CAUSAL_LM"))
     trainer.train(resume_from_checkpoint=ckpts[-1] if ckpts else None)

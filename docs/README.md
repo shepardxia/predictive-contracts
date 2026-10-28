@@ -377,18 +377,27 @@ The existing checkpoint resume behavior is retained (including resetting the mat
 `TRAIN_GPUS` can limit how many allocated GPUs train; legibility reserves the last visible GPU for
 its monitor. These batch guarantees cover the GRPO trainers, not the separate SFT/OPSD warm-ups.
 
-The Mila launcher (`slurm/run.sh`) uses four sequences per GPU per microbatch. Plain RL on four
-training GPUs accumulates 16 microbatches for its global batch of 256 rollouts. Decoupled runs
-have 512 rollouts and accumulate 32; monitored runs use two policy GPUs and also accumulate 32.
-Changing the microbatch preserves these global batch sizes, and W&B configuration is updated on resume.
+The Mila launcher (`slurm/run.sh`) uses eight sequences per GPU per microbatch with `--prefix-pack`.
+Plain RL on four training GPUs accumulates eight microbatches for its global batch of 256 rollouts.
+Decoupled runs have 512 rollouts and accumulate 16; monitored runs use two policy GPUs and also
+accumulate 16. Changing the microbatch preserves these global batch sizes, and W&B configuration
+is updated on resume. Both SFT warmups use microbatch four and keep their global batch at 16.
+
+The pinned `predictive-contracts` branch of `shepardxia/trl` packs shared prompts, chunks the
+reference/old-policy log-probability passes without Liger, and routes the packed loss through DDP
+so gradients are averaged. W&B's `train/prefix_pack/packed_microbatch_fraction` records whether
+packing actually engages. Grouped microbatches preserve the update here because
+`steps_per_generation == gradient_accumulation_steps` and `num_iterations == 1`. DDP's unused-parameter
+scan is disabled: every trainable LoRA parameter participates in these forwards.
 
 Scaling notes for a larger model: everything model-specific sits in three places -- the
 `<think>` markers and stop sentences (`prompts.THINK_BUDGET_STOP`, `COMMIT_THINK_BUDGET_STOP`, used by
 `generate_budgeted` and `llm.chat_budgeted`), `enable_thinking` in the chat-template calls, and the
 `<|im_end|>` / pad token ids read from the tokenizer. `--per-device-batch`, `--vllm-gpu-mem` and the
-24 h job chains are the knobs that were tuned for one H100 per run. Per-step cost is dominated by
-generation: 256 solutions x (4096 + 1536) tokens for a thinking run, plus 256 x (1024 + 128) when the
-commitments think.
+24 h job chains are the knobs that were tuned for one H100 per run. Each thinking step generates
+256 solutions x (4096 + 1536) tokens, plus 256 x (1024 + 128) when the commitments think. The
+policy/reference forwards and training backward passes also contribute substantially; use measured
+step times and memory when choosing the microbatch and estimating runtime.
 
 ## Caveats to carry forward
 
