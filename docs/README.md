@@ -377,6 +377,11 @@ The existing checkpoint resume behavior is retained (including resetting the mat
 `TRAIN_GPUS` can limit how many allocated GPUs train; legibility reserves the last visible GPU for
 its monitor. These batch guarantees cover the GRPO trainers, not the separate SFT/OPSD warm-ups.
 
+The Mila launcher (`slurm/run.sh`) uses four sequences per GPU per microbatch. Plain RL on four
+training GPUs accumulates 16 microbatches for its global batch of 256 rollouts. Decoupled runs
+have 512 rollouts and accumulate 32; monitored runs use two policy GPUs and also accumulate 32.
+Changing the microbatch preserves these global batch sizes, and W&B configuration is updated on resume.
+
 Scaling notes for a larger model: everything model-specific sits in three places -- the
 `<think>` markers and stop sentences (`prompts.THINK_BUDGET_STOP`, `COMMIT_THINK_BUDGET_STOP`, used by
 `generate_budgeted` and `llm.chat_budgeted`), `enable_thinking` in the chat-template calls, and the

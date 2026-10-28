@@ -83,7 +83,8 @@ class ResearchLog(TrainerCallback):
                                         "entity": self.run.entity, "launch": self.launch}) + "\n")
         self.run.define_metric("train/global_step")
         self.run.define_metric("*", step_metric="train/global_step")
-        self.run.config.update({"training_gpus": int(os.environ.get("WORLD_SIZE", 1))}, allow_val_change=True)
+        self.run.config.update({**vars(args), "training_gpus": int(os.environ.get("WORLD_SIZE", 1))},
+                               allow_val_change=True)
 
     def on_train_begin(self, args, state, control, **kwargs):
         if self.run is not None:
