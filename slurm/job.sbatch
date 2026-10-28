@@ -1,12 +1,12 @@
 #!/bin/bash
 # Usage: sbatch slurm/job.sbatch <run-name> <stage> [stage arguments]
-#SBATCH --partition=short-unkillable
+#SBATCH --partition=long
 #SBATCH --gres=gpu:a100l:4
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=96G
-#SBATCH --time=03:00:00
+#SBATCH --time=7-00:00:00
 #SBATCH --signal=B:USR1@300
 #SBATCH --requeue
 #SBATCH --open-mode=append
