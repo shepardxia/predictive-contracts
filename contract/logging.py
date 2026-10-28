@@ -3,6 +3,7 @@ import collections
 import json
 import math
 import os
+import time
 from pathlib import Path
 
 from transformers import TrainerCallback
@@ -26,7 +27,10 @@ def record_rollout(rollout):
         return None
 
     def recorded(prompts, trainer):
+        started = time.perf_counter()
         out = rollout(prompts, trainer)
+        mode = "train" if trainer.model.training else "eval"
+        trainer._metrics[mode]["timing/rollout_seconds"].append(time.perf_counter() - started)
         tok = trainer.processing_class
         out["prompt_text"] = tok.batch_decode(out["prompt_ids"], skip_special_tokens=False)
         out["completion_text"] = tok.batch_decode(out["completion_ids"], skip_special_tokens=False)
@@ -88,7 +92,10 @@ class ResearchLog(TrainerCallback):
 
     def on_train_begin(self, args, state, control, **kwargs):
         if self.run is not None:
+            import torch
+
             self.run.config.update({"trainer": args.to_dict()}, allow_val_change=True)
+            self.run.config.update({"float32_matmul_precision": torch.get_float32_matmul_precision()}, allow_val_change=True)
             self.run.summary["resume_from_step"] = state.global_step
 
     def log_batch(self, metrics, rows, global_step):

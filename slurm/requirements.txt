@@ -11,4 +11,4 @@ openai==3.16.2
 wandb==0.30.0
 scipy==1.18.1
 scikit-learn==1.7.2
-trl @ git+https://github.com/shepardxia/trl@366cb5ac40ca3c4634669c0cfc513f4388acbf71
+trl @ git+https://github.com/shepardxia/trl@3370c4afffe95fe66a9446a18d21909805f14dbb

@@ -92,29 +92,30 @@ def generate_budgeted(gen, tok, prompt_ids, num_generations, think_budget, answe
     generates the answer for up to `answer_cap` tokens.  Completions that closed the block themselves but ran out
     of budget mid-answer also continue in phase 2 (no splice).  Returns, per output: completion ids, logprobs,
     env_mask, whether the block was force-closed, and the thinking length in tokens."""
-    eos, think_end = tok.convert_tokens_to_ids("<|im_end|>"), tok.convert_tokens_to_ids("</think>")
-    stop_ids = tok.encode("\n" + stop_text + "\n</think>\n\n", add_special_tokens=False)
-    gen.max_completion_length = think_budget
-    # `prompt_ids` already lists one prompt per output (TRL repeats each prompt num_generations times and its
-    # vLLM wrapper de-duplicates), so generate() returns exactly len(prompt_ids) completions, aligned with it.
-    _, comp, lps, _ = gen.generate(prompts=prompt_ids, images=None, num_generations=num_generations)
-    completion_ids = [list(c) for c in comp]
-    logprobs = [[lp[0] for lp in seq] for seq in lps]
-    env_mask = [[1] * len(c) for c in completion_ids]
-    forced, think_len = [], []
-    for i, c in enumerate(completion_ids):
-        closed = think_end in c
-        think_len.append(c.index(think_end) if closed else len(c))
-        forced.append(not closed)
-        if not closed:
-            completion_ids[i] += stop_ids; logprobs[i] += [0.0] * len(stop_ids); env_mask[i] += [0] * len(stop_ids)
-    cont = [i for i, c in enumerate(completion_ids) if c[-1] != eos]  # everything that has not ended yet answers in phase 2
-    if cont:
-        gen.max_completion_length = answer_cap
-        _, comp, lps, _ = gen.generate(prompts=[prompt_ids[i] + completion_ids[i] for i in cont], images=None, num_generations=1)
-        for i, c, seq in zip(cont, comp, lps):
-            completion_ids[i] += list(c); logprobs[i] += [lp[0] for lp in seq]; env_mask[i] += [1] * len(c)
-    return completion_ids, logprobs, env_mask, [float(f) for f in forced], [float(n) for n in think_len]
+    # The answer continues the same policy; retain its weights and cached reasoning until both phases finish.
+    with gen.generation_session():
+        eos, think_end = tok.convert_tokens_to_ids("<|im_end|>"), tok.convert_tokens_to_ids("</think>")
+        stop_ids = tok.encode("\n" + stop_text + "\n</think>\n\n", add_special_tokens=False)
+        gen.max_completion_length = think_budget
+        # `prompt_ids` already lists one prompt per output, including repeated prompts within each group.
+        _, comp, lps, _ = gen.generate(prompts=prompt_ids, images=None, num_generations=num_generations)
+        completion_ids = [list(c) for c in comp]
+        logprobs = [[lp[0] for lp in seq] for seq in lps]
+        env_mask = [[1] * len(c) for c in completion_ids]
+        forced, think_len = [], []
+        for i, c in enumerate(completion_ids):
+            closed = think_end in c
+            think_len.append(c.index(think_end) if closed else len(c))
+            forced.append(not closed)
+            if not closed:
+                completion_ids[i] += stop_ids; logprobs[i] += [0.0] * len(stop_ids); env_mask[i] += [0] * len(stop_ids)
+        cont = [i for i, c in enumerate(completion_ids) if c[-1] != eos]  # unfinished episodes answer in phase 2
+        if cont:
+            gen.max_completion_length = answer_cap
+            _, comp, lps, _ = gen.generate(prompts=[prompt_ids[i] + completion_ids[i] for i in cont], images=None, num_generations=1)
+            for i, c, seq in zip(cont, comp, lps):
+                completion_ids[i] += list(c); logprobs[i] += [lp[0] for lp in seq]; env_mask[i] += [1] * len(c)
+        return completion_ids, logprobs, env_mask, [float(f) for f in forced], [float(n) for n in think_len]
 
 
 def open_logs(out, names=("reward_log", "rollouts", "hack_examples")):

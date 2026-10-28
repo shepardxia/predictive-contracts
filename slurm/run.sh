@@ -5,6 +5,8 @@ STAGE=$1; shift
 DATA="$RUN_ROOT/data/leetcode/leetcode_train_medhard_filtered.jsonl"
 PREP="$RUN_ROOT/prepared"
 PY="$VENV/bin/python"
+# Colocated vLLM sets PyTorch's process-wide precision, including the training head's FP32 matmuls.
+export VLLM_FLOAT32_MATMUL_PRECISION=high
 PORT=$((20000 + SLURM_JOB_ID % 10000))
 IFS=, read -r -a devices <<< "$CUDA_VISIBLE_DEVICES"
 NGPUS=${#devices[@]}
@@ -52,8 +54,8 @@ train() {
 
 COMMON=(--model Qwen/Qwen3-4B --data "$DATA" --hint modify_tests --thinking --think-budget 4096
         --num-prompts 16 --num-generations 16 --max-completion-length 1536 --max-steps 200
-        --save-steps 1 --per-device-batch 8 --prefix-pack --split-normalize --is-mode token_truncate
-        --mask-truncated --vllm-sleep --seed 1 --out "$OUT")
+        --save-steps 1 --per-device-batch 16 --prefix-pack --split-normalize --is-mode token_truncate
+        --mask-truncated --vllm-sleep --vllm-gpu-mem 0.70 --seed 1 --out "$OUT")
 
 case "$STAGE" in
     base)
