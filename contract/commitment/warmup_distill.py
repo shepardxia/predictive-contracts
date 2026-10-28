@@ -58,7 +58,7 @@ def sample(args):
             lines = "\n".join(f"{i + 1}. {tg[b]:.2f}" for i, b in enumerate(names))
             teacher_msgs.append(teacher_messages(student, facts, lines, args.hint_style))
             sample_targets.append(tg)
-    flat = llm.chat_many(teacher_msgs, n=1, stop_text=COMMIT_THINK_BUDGET_STOP)
+    flat = llm.chat_many(teacher_msgs, n=1, stop_text=COMMIT_THINK_BUDGET_STOP, cache_path=args.out + ".responses.jsonl")
     outs = [[(o[0], sample_targets[j * args.n + k]) for k, o in enumerate(flat[j * args.n:(j + 1) * args.n])] for j in range(len(tasks))]
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
     kept = n_hit = n_leak = n_unforced = 0

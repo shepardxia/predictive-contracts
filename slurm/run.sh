@@ -38,7 +38,7 @@ train() {
 
 COMMON=(--model Qwen/Qwen3-4B --data "$DATA" --hint modify_tests --thinking --think-budget 4096
         --num-prompts 16 --num-generations 16 --max-completion-length 1536 --max-steps 200
-        --save-steps 10 --per-device-batch 2 --split-normalize --is-mode token_truncate
+        --save-steps 1 --per-device-batch 2 --split-normalize --is-mode token_truncate
         --mask-truncated --vllm-sleep --seed 1 --out "$OUT")
 
 case "$STAGE" in
@@ -83,15 +83,17 @@ case "$STAGE" in
             --init-adapter "$RUN_ROOT/runs/commitment_warmup/final" "$@"
         ;;
     monitor)
+        policy_gpus=$((NGPUS > 1 ? NGPUS / 2 : 1))
         if (( NGPUS == 1 )); then
             # The frozen 4B monitor shares the card with policy generation and training.
             serve "${devices[0]}" 1 --gpu-memory-utilization 0.20 --max-model-len 8192 --max-num-seqs 16
         else
-            serve "${devices[1]}" 1
+            monitor_devices=$(IFS=,; printf '%s' "${devices[*]:policy_gpus}")
+            serve "$monitor_devices" "$((NGPUS - policy_gpus))"
         fi
-        export CUDA_VISIBLE_DEVICES="${devices[0]}"
+        export CUDA_VISIBLE_DEVICES=$(IFS=,; printf '%s' "${devices[*]:0:policy_gpus}")
         export SLURM_CPUS_PER_TASK=$((SLURM_CPUS_PER_TASK / 2))
-        train 1 contract.legibility.train "${COMMON[@]}" --monitor-model Qwen/Qwen3-4B \
+        train "$policy_gpus" contract.legibility.train "${COMMON[@]}" --monitor-model Qwen/Qwen3-4B \
             --flag-threshold 0.1 --init-adapter "$RUN_ROOT/runs/hacking_warmup/final" "$@"
         ;;
     *) echo "Unknown stage: $STAGE" >&2; exit 1 ;;

@@ -165,7 +165,7 @@ def sample(args):
     llm = LLM(model=args.model, thinking=False, max_tokens=args.max_tokens)
     msgs = [[{"role": "system", "content": TEACHER_SYSTEM},
              {"role": "user", "content": TEACHER.format(description=HACK_DESCRIPTIONS[kind], shown=shown, hack=snippet)}] for _, kind, _, snippet, shown, _ in built]
-    outs = llm.chat_many(msgs, n=args.n)
+    outs = llm.chat_many(msgs, n=args.n, cache_path=args.out + ".responses.jsonl")
     tok = AutoTokenizer.from_pretrained(args.model)
     mentions, leak = re.compile(MENTIONS_HACK, re.I), re.compile(LEAK, re.I)
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)

@@ -4,6 +4,8 @@ All model access in this project goes through this class so that the same
 code can talk to a local vLLM server on the cluster (the default) or to any
 other OpenAI-compatible endpoint.
 """
+import hashlib
+import json
 import math
 import os
 from concurrent.futures import ThreadPoolExecutor
@@ -92,9 +94,33 @@ class LLM:
         content = c2.text if forced else (c.message.content or "") + c2.text
         return {"content": content, "reasoning": reasoning + ("\n" + stop_text if forced else ""), "finish_reason": c2.finish_reason, "think_forced": forced}
 
-    def chat_many(self, message_lists, n=1, **kw):
-        with ThreadPoolExecutor(self.workers) as ex:
-            return list(ex.map(lambda m: self.chat(m, n=n, **kw), message_lists))
+    def chat_many(self, message_lists, n=1, cache_path=None, **kw):
+        """Optionally retain frozen-teacher responses across interrupted warm-up sampling jobs."""
+        if cache_path is None:
+            with ThreadPoolExecutor(self.workers) as ex:
+                return list(ex.map(lambda m: self.chat(m, n=n, **kw), message_lists))
+        # Include the index so repeated prompts still receive independent samples.
+        config = [self.model, self.thinking, self.think_budget, self.max_tokens, self.temperature, self.top_p]
+        keys = [hashlib.sha256(json.dumps([config, i, m, n, kw], sort_keys=True).encode()).hexdigest()
+                for i, m in enumerate(message_lists)]
+        saved = {}
+        if os.path.exists(cache_path):
+            with open(cache_path, "rb+") as f:
+                for line in f:
+                    if not line.endswith(b"\n"):
+                        f.truncate(f.tell() - len(line))
+                        break
+                    row = json.loads(line)
+                    saved[row["key"]] = row["response"]
+        pending = [i for i, key in enumerate(keys) if key not in saved]
+        print(f"teacher responses: {len(keys) - len(pending)} saved, {len(pending)} remaining", flush=True)
+        os.makedirs(os.path.dirname(cache_path) or ".", exist_ok=True)
+        with open(cache_path, "a") as f, ThreadPoolExecutor(self.workers) as ex:
+            for i, response in zip(pending, ex.map(lambda i: self.chat(message_lists[i], n=n, **kw), pending)):
+                saved[keys[i]] = response
+                f.write(json.dumps({"key": keys[i], "response": response}) + "\n")
+                f.flush()
+        return [saved[key] for key in keys]
 
     def next_token_probs(self, messages, top=20):
         """Probability of each candidate first token of the assistant's reply.

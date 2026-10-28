@@ -148,23 +148,27 @@ environment archive, data, prepared traces, runs and logs. Prepare on the login 
 `bash slurm/setup.sh`, then `bash slurm/submit.sh`. The environment pins the user's TRL fork at
 `900a473c6575804152839d877f4af1034c212f85`; prefix packing remains at its default setting.
 
-Jobs request **1 x a100l (2 for monitored runs), 16 CPUs, 96 GB RAM, 7 days on `long`, with requeue**. Submission takes
+Jobs request **4 x a100l, 16 CPUs, 96 GB RAM, 3 hours on `short-unkillable`**. The batch script
+requeues the same job five minutes before its limit, so dependencies wait for the complete stage
+across allocations. Submission takes
 a source snapshot; each job stages that snapshot and the packed venv onto node-local storage. The
 six 200-step, seed-1 GRPO runs use 16 problems x 16 generations globally, a 4096-token thinking budget,
-1536 answer tokens and checkpoints every 10 steps:
+1536 answer tokens and checkpoints every step:
 
 - Commitment comparison: task-only from the base model; decoupled commitments; decoupled commitments
   plus agreement. The latter two share the jittered reasoning-commitment distillation warm-up.
 - Legibility comparison: task-only, monitor penalty, and legibility reward, all from the same hacking
-  warm-up (window + answer loss, 3 epochs, learning rate 3e-5). The two monitored runs use one GPU
-  for the policy and a second for the chain-only Qwen3-4B monitor, at threshold 0.1.
+  warm-up (window + answer loss, 3 epochs, learning rate 3e-5). The two monitored runs use two GPUs
+  for the policy and two for the chain-only Qwen3-4B monitor, at threshold 0.1. Other training runs
+  use all four GPUs for the policy, with the same global batch size.
 
 Three prerequisite jobs generate base-model training transcripts and probe targets, then independently
 prepare the commitment and hacking adapters. SLURM `afterok` dependencies hold the five dependent
 training jobs until their adapters are ready; the base task-only control can start immediately.
 Base transcript generation appends completed chunks and resumes missing samples. Both SFT warm-ups
 checkpoint every 10 steps and retain the same global batch when the GPU count changes. Trace files are published only
-when sampling finishes, so preemption cannot turn a partial warm-up dataset into a completed one.
+when sampling finishes, so interruption cannot turn a partial warm-up dataset into a completed one.
+Warm-up sampling saves frozen-teacher responses as it goes and reuses them after a restart.
 Job IDs are recorded in `$SCRATCH/predictive-contracts/jobs.tsv`; training output is in
 `runs/<name>/run.log`, with full GRPO metrics and rollouts in W&B.
 

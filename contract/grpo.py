@@ -120,7 +120,15 @@ def open_logs(out, names=("reward_log", "rollouts", "hack_examples")):
     """Append-mode log files, plus the step to resume from.  Lines logged after the latest checkpoint are dropped
     (a pre-empted job may have logged steps it never saved), so a resumed run's logs read as one run."""
     os.makedirs(out, exist_ok=True)
-    ckpts = sorted(glob.glob(f"{out}/checkpoint-*"), key=lambda c: int(c.rsplit("-", 1)[1]))
+    ckpts = []
+    for path in sorted(glob.glob(f"{out}/checkpoint-*"), key=lambda c: int(c.rsplit("-", 1)[1])):
+        # Trainer writes this after the model, optimizer and scheduler. Ignore interrupted saves.
+        try:
+            with open(f"{path}/trainer_state.json") as f:
+                json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            continue
+        ckpts.append(path)
     resume_step = int(ckpts[-1].rsplit("-", 1)[1]) if ckpts else 0
     files = {}
     for name in names:
@@ -129,7 +137,7 @@ def open_logs(out, names=("reward_log", "rollouts", "hack_examples")):
             continue
         path = f"{out}/{name}.jsonl"
         if os.path.exists(path):
-            lines = [l for l in open(path) if json.loads(l)["call"] <= resume_step]
+            lines = [l for l in open(path) if l.endswith("\n") and json.loads(l)["call"] <= resume_step]
             open(path, "w").writelines(lines)
         files[name] = open(path, "a")
     return files, ckpts, resume_step

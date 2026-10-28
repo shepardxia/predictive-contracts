@@ -1,12 +1,13 @@
 #!/bin/bash
 # Usage: sbatch slurm/job.sbatch <run-name> <stage> [stage arguments]
-#SBATCH --partition=long
-#SBATCH --gres=gpu:a100l:1
+#SBATCH --partition=short-unkillable
+#SBATCH --gres=gpu:a100l:4
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=96G
-#SBATCH --time=7-00:00:00
+#SBATCH --time=03:00:00
+#SBATCH --signal=B:USR1@300
 #SBATCH --requeue
 #SBATCH --open-mode=append
 
@@ -33,12 +34,16 @@ mkdir -p "$OUT"
 printf '%s\n' "$SOURCE_ARCHIVE" > "$OUT/source_archive"
 export PATH="$VENV/bin:$PATH"
 cd "$PROJECT_ROOT"
+# Requeue before the allocation expires; afterok dependencies remain attached to this job ID.
+trap 'echo "[allocation] requeuing before time limit" >> "$OUT/run.log"; scontrol requeue "$SLURM_JOB_ID"; exit 0' USR1
+printf '[allocation] job=%s restart=%s\n' "$SLURM_JOB_ID" "${SLURM_RESTART_COUNT:-0}" >> "$OUT/run.log"
 # Mila gives each Slurm step its own /tmp; stage inside the step that uses it.
-exec srun --gres-flags=allow-task-sharing bash -c '
+srun --gres-flags=allow-task-sharing bash -c '
     set -euo pipefail
     mkdir -p "$VENV" "$SLURM_TMPDIR/code"
     tar xf "$RUN_ROOT/venv.tar" -C "$VENV"
     tar xf "$SOURCE_ARCHIVE" -C "$SLURM_TMPDIR/code"
     cd "$SLURM_TMPDIR/code"
     exec bash slurm/run.sh "$@"
-' bash "$@" >> "$OUT/run.log" 2>&1
+' bash "$@" >> "$OUT/run.log" 2>&1 &
+wait $!
