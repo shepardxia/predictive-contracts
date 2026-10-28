@@ -162,6 +162,12 @@ six 200-step, seed-1 GRPO runs use 16 problems x 16 generations globally, a 4096
   for the policy and two for the chain-only Qwen3-4B monitor, at threshold 0.1. Other training runs
   use all four GPUs for the policy, with the same global batch size.
 
+Inference uses independent one-GPU vLLM replicas (`tensor_parallel_size=1`): four for data
+preparation, two for the frozen monitor. The client distributes requests across comma-separated
+`LLM_BASE_URLS` / `MONITOR_URLS`; preparation keeps 256 requests in flight. Generation continues
+while results are graded and saved in groups of 64. Each replica has its own sampling seed and
+`server-<replica>.log`. Policy training uses DDP and one colocated generation engine per rank.
+
 Three prerequisite jobs generate base-model training transcripts and probe targets, then independently
 prepare the commitment and hacking adapters. SLURM `afterok` dependencies hold the five dependent
 training jobs until their adapters are ready; the base task-only control can start immediately.

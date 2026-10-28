@@ -138,9 +138,10 @@ def main():
         for attempt in range(args.max_attempts):
             print(f"attempt {attempt + 1}: {len(live)} transcripts", flush=True)
             still_live = []
-            for start in range(0, len(live), llm.workers):
-                chunk = live[start:start + llm.workers]
-                outs = llm.chat_many([transcripts[i]["messages"] for i in chunk], n=1)
+            generated = llm.iter_chat([transcripts[i]["messages"] for i in live], n=1)
+            for start in range(0, len(live), 64):
+                chunk = live[start:start + 64]
+                outs = [next(generated) for _ in chunk]
                 responses = [o[0] for o in outs]
                 scores = env.score_many([task_by_id[transcripts[i]["task_id"]] for i in chunk], [r["content"] for r in responses])
                 for i, r, s in zip(chunk, responses, scores):
@@ -156,6 +157,7 @@ def main():
                         f.write(json.dumps(tr) + "\n")
                 f.flush()
                 print(f"  scored {min(start + len(chunk), len(live))}/{len(live)}", flush=True)
+            generated.close()
             live = still_live
             if not live:
                 break

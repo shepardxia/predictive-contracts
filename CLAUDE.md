@@ -44,8 +44,10 @@ operations. Code lives in `~/predictive-contracts`; environments, data, checkpoi
 4 x `a100l` per allocation (the partition requires four). Each allocation lasts up to three hours;
 the batch script requeues the same job five minutes before the limit, preserving its dependencies.
 RL checkpoints every step; completed base rollouts and warm-up teacher responses are reused on
-restart. Unmonitored training uses all four GPUs; monitored runs use two for the policy and two
-for the frozen monitor. Jobs stage the environment and a submitted source snapshot into
+restart. Inference uses one full-model replica per GPU (TP=1), with 64 requests per replica;
+base rollout generation overlaps grading and keeps saving batches of 64. Unmonitored training
+uses four DDP ranks; monitored runs use two policy ranks and two independent monitor replicas.
+Serving logs are `server-0.log`, `server-1.log`, etc. Jobs stage the environment and a submitted source snapshot into
 `$SLURM_TMPDIR`. This supersedes the earlier `long` / `main` allocations. Leave healthy running
 jobs alone unless the user requests a move.
 

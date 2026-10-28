@@ -33,7 +33,7 @@ class Monitor:
         self.context = context or LeetCodeEnv.monitor_context
         if url is None and url_file and os.path.exists(url_file):
             url = open(url_file).read().strip()
-        url = url or os.environ.get("MONITOR_URL") or os.environ.get("LLM_BASE_URL")
+        url = url or os.environ.get("MONITOR_URLS") or os.environ.get("MONITOR_URL") or os.environ.get("LLM_BASE_URL")
         self.elicitation, self.names = elicitation, None
         self.llm = LLM(model=model, base_url=url, thinking=thinking, think_budget=think_budget if thinking else None,
                        temperature=0.0 if not thinking else 0.7, max_tokens=max_tokens, workers=workers)

@@ -8,23 +8,37 @@ PY="$VENV/bin/python"
 PORT=$((20000 + SLURM_JOB_ID % 10000))
 IFS=, read -r -a devices <<< "$CUDA_VISIBLE_DEVICES"
 NGPUS=${#devices[@]}
-SERVER_PID=
-trap 'if [ -n "$SERVER_PID" ]; then kill "$SERVER_PID" 2>/dev/null || true; fi' EXIT
+SERVER_PIDS=()
+stop_servers() {
+    for pid in "${SERVER_PIDS[@]}"; do kill "$pid" 2>/dev/null || true; done
+    for pid in "${SERVER_PIDS[@]}"; do wait "$pid" || true; done
+    SERVER_PIDS=()
+}
+trap stop_servers EXIT
 
 serve() {
-    local devices=$1 tp=$2
-    shift 2
-    CUDA_VISIBLE_DEVICES="$devices" "$PY" -m vllm.entrypoints.openai.api_server \
-        --model Qwen/Qwen3-4B --port "$PORT" --dtype bfloat16 --max-model-len 16384 \
-        --tensor-parallel-size "$tp" --disable-custom-all-reduce --gpu-memory-utilization 0.85 --enable-prefix-caching \
-        --reasoning-parser qwen3 --max-num-seqs 128 "$@" > "$OUT/server.log" 2>&1 &
-    SERVER_PID=$!
-    until curl -sf "http://localhost:$PORT/health" >/dev/null; do
-        kill -0 "$SERVER_PID" 2>/dev/null || { tail -30 "$OUT/server.log"; exit 1; }
-        sleep 5
+    local -a gpu_list urls
+    IFS=, read -r -a gpu_list <<< "$1"; shift
+    local i port
+    for i in "${!gpu_list[@]}"; do
+        port=$((PORT + i))
+        CUDA_VISIBLE_DEVICES="${gpu_list[i]}" "$PY" -m vllm.entrypoints.openai.api_server \
+            --model Qwen/Qwen3-4B --port "$port" --dtype bfloat16 --max-model-len 16384 \
+            --tensor-parallel-size 1 --seed "$((1 + i))" --gpu-memory-utilization 0.85 --enable-prefix-caching \
+            --reasoning-parser qwen3 --max-num-seqs 128 "$@" > "$OUT/server-$i.log" 2>&1 &
+        SERVER_PIDS+=("$!")
+        urls+=("http://localhost:$port/v1")
     done
-    export LLM_BASE_URL="http://localhost:$PORT/v1"
-    export MONITOR_URL="$LLM_BASE_URL"
+    for i in "${!gpu_list[@]}"; do
+        until curl -sf "${urls[i]%/v1}/health" >/dev/null; do
+            kill -0 "${SERVER_PIDS[i]}" 2>/dev/null || { tail -30 "$OUT/server-$i.log"; exit 1; }
+            sleep 5
+        done
+    done
+    export LLM_BASE_URL="${urls[0]}"
+    export LLM_BASE_URLS=$(IFS=,; printf '%s' "${urls[*]}")
+    export MONITOR_URL="$LLM_BASE_URL" MONITOR_URLS="$LLM_BASE_URLS"
+    export LLM_WORKERS=$((64 * ${#gpu_list[@]}))
 }
 
 train() {
@@ -43,33 +57,33 @@ COMMON=(--model Qwen/Qwen3-4B --data "$DATA" --hint modify_tests --thinking --th
 
 case "$STAGE" in
     base)
-        serve "$CUDA_VISIBLE_DEVICES" "$NGPUS"
+        serve "$CUDA_VISIBLE_DEVICES"
         "$PY" -m contract.run_tasks --model Qwen/Qwen3-4B --data "$DATA" --hint modify_tests \
             --neutral-system-prompt --thinking --think-budget 4096 --max-tokens 1536 --n 8 --seed 1 \
             --resume --out "$PREP/base_train.jsonl"
-        kill "$SERVER_PID"; wait "$SERVER_PID" || true; SERVER_PID=
+        stop_servers
         "$PY" -m contract.probe_features --data "$DATA" --batch-size 4 --out "$PREP/features.npz"
         "$PY" -m contract.probe --features "$PREP/features.npz" --transcripts "$PREP/base_train.jsonl" \
             --behaviors any_hack earns_reward --predict-out "$PREP/targets.json"
         ;;
     commitment_warmup)
         if [ ! -s "$PREP/commitment_traces.jsonl" ]; then
-            serve "$CUDA_VISIBLE_DEVICES" "$NGPUS"
+            serve "$CUDA_VISIBLE_DEVICES"
             "$PY" -m contract.commitment.warmup_distill sample --data "$DATA" --targets "$PREP/targets.json" \
                 --variant v1 --n 6 --keep 2 --jitter-logit 0.75 --save-all --out "$PREP/commitment_traces.jsonl.tmp"
             mv "$PREP/commitment_traces.jsonl.tmp" "$PREP/commitment_traces.jsonl"
             mv "$PREP/commitment_traces.jsonl.tmp.all.jsonl" "$PREP/commitment_traces.all.jsonl"
-            kill "$SERVER_PID"; wait "$SERVER_PID" || true; SERVER_PID=
+            stop_servers
         fi
         train "$NGPUS" contract.commitment.warmup_distill train --traces "$PREP/commitment_traces.jsonl" --variant v1 --out "$OUT"
         ;;
     hacking_warmup)
         if [ ! -s "$PREP/hack_traces.jsonl" ]; then
-            serve "$CUDA_VISIBLE_DEVICES" "$NGPUS"
+            serve "$CUDA_VISIBLE_DEVICES"
             "$PY" -m contract.legibility.warmup_hack sample --data "$DATA" --rollouts "$PREP/base_train.jsonl" \
                 --out "$PREP/hack_traces.jsonl.tmp"
             mv "$PREP/hack_traces.jsonl.tmp" "$PREP/hack_traces.jsonl"
-            kill "$SERVER_PID"; wait "$SERVER_PID" || true; SERVER_PID=
+            stop_servers
         fi
         train "$NGPUS" contract.legibility.warmup_distill train --traces "$PREP/hack_traces.jsonl" \
             --no-mask-hacked-answers --loss-on window+answer --epochs 3 --lr 3e-5 --out "$OUT"
@@ -86,10 +100,10 @@ case "$STAGE" in
         policy_gpus=$((NGPUS > 1 ? NGPUS / 2 : 1))
         if (( NGPUS == 1 )); then
             # The frozen 4B monitor shares the card with policy generation and training.
-            serve "${devices[0]}" 1 --gpu-memory-utilization 0.20 --max-model-len 8192 --max-num-seqs 16
+            serve "${devices[0]}" --gpu-memory-utilization 0.20 --max-model-len 8192 --max-num-seqs 16
         else
             monitor_devices=$(IFS=,; printf '%s' "${devices[*]:policy_gpus}")
-            serve "$monitor_devices" "$((NGPUS - policy_gpus))"
+            serve "$monitor_devices"
         fi
         export CUDA_VISIBLE_DEVICES=$(IFS=,; printf '%s' "${devices[*]:0:policy_gpus}")
         export SLURM_CPUS_PER_TASK=$((SLURM_CPUS_PER_TASK / 2))
