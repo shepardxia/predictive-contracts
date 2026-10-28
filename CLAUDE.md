@@ -40,7 +40,7 @@ mitigates hacking relative to baseline behavior.
 Active runs use **Mila**, user `xiash`, via `ssh mila`. Follow `~/.claude/MILA.md` for cluster
 operations. Code lives in `~/predictive-contracts`; environments, data, checkpoints and logs live in
 `$SCRATCH/predictive-contracts`. `slurm/setup.sh` prepares the environment and data on the login node.
-`slurm/submit.sh` submits both comparisons and their prerequisites on `short-unkillable`, with
+`slurm/submit.sh` submits the legibility comparison and its prerequisites on `short-unkillable`, with
 4 x `a100l` per allocation (the partition requires four). Each allocation lasts up to three hours;
 the batch script requeues the same job five minutes before the limit, preserving its dependencies.
 RL checkpoints every step; completed base rollouts and warm-up teacher responses are reused on
@@ -53,6 +53,13 @@ step time, and GPU memory before treating utilization as verified. SFT uses micr
 Serving logs are `server-0.log`, `server-1.log`, etc. Jobs stage the environment and a submitted source snapshot into
 `$SLURM_TMPDIR`. This supersedes the earlier `long` / `main` allocations. Leave healthy running
 jobs alone unless the user requests a move.
+
+The active comparison is task-only, monitor penalty, and legibility reward, all from the same hacking
+warm-up. The task-only control has no monitor and uses four policy GPUs. On 2026-10-28 the three
+commitment jobs were shelved at steps 30 / 23 / 23; their checkpoints and logs are retained. Do not
+resubmit them automatically. The later research notes motivate this scope: `docs/commitment/results_part4.md`
+records the completed task-only baseline and stopped prediction recipe; `docs/legibility/plan.md`
+describes the controlled comparison from the hacking warm-up.
 
 The CSAIL instructions below describe the upstream project's deployment and historical results.
 

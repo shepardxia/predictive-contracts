@@ -146,21 +146,29 @@ results/  -> symlink to ~/code_nobackup/contract/results (outside Dropbox): ever
 Mila deployment uses `~/predictive-contracts` for code and `$SCRATCH/predictive-contracts` for the
 environment archive, data, prepared traces, runs and logs. Prepare on the login node with
 `bash slurm/setup.sh`, then `bash slurm/submit.sh`. The environment pins the user's TRL fork at
-`900a473c6575804152839d877f4af1034c212f85`; prefix packing remains at its default setting.
+`366cb5ac40ca3c4634669c0cfc513f4388acbf71`; the launcher enables prefix packing.
 
 Jobs request **4 x a100l, 16 CPUs, 96 GB RAM, 3 hours on `short-unkillable`**. The batch script
 requeues the same job five minutes before its limit, so dependencies wait for the complete stage
 across allocations. Submission takes
 a source snapshot; each job stages that snapshot and the packed venv onto node-local storage. The
-six 200-step, seed-1 GRPO runs use 16 problems x 16 generations globally, a 4096-token thinking budget,
+three 200-step, seed-1 GRPO runs use 16 problems x 16 generations globally, a 4096-token thinking budget,
 1536 answer tokens and checkpoints every step:
 
-- Commitment comparison: task-only from the base model; decoupled commitments; decoupled commitments
-  plus agreement. The latter two share the jittered reasoning-commitment distillation warm-up.
-- Legibility comparison: task-only, monitor penalty, and legibility reward, all from the same hacking
-  warm-up (window + answer loss, 3 epochs, learning rate 3e-5). The two monitored runs use two GPUs
-  for the policy and two for the chain-only Qwen3-4B monitor, at threshold 0.1. Other training runs
-  use all four GPUs for the policy, with the same global batch size.
+- Task-only: task reward alone, four policy GPUs, no monitor.
+- Monitor penalty: task reward minus 2 when the chain-only monitor flags tampering.
+- Legibility reward: separately normalized task reward and monitor correctness reward.
+
+All three start from the same hacking warm-up (window + answer loss, 3 epochs, learning rate 3e-5).
+The two monitored runs use two policy GPUs and two chain-only Qwen3-4B monitor replicas, at threshold 0.1.
+The global batch size is the same across conditions. Preparation and hacking warm-up are the only
+prerequisites submitted by `slurm/submit.sh`.
+
+The commitment comparison was shelved on 2026-10-28: task-only at step 30, prediction at 23, agreement
+at 23. Its checkpoints, logs, and completed warm-up are retained, but those jobs are no longer submitted
+or monitored for automatic recovery. See `commitment/results_part4.md` for the completed baseline,
+stopped prediction recipe, and later rate-matching objective; the active comparison follows
+`legibility/plan.md`'s 2026-10-18 plan.
 
 Inference uses independent one-GPU vLLM replicas (`tensor_parallel_size=1`): four for data
 preparation, two for the frozen monitor. The client distributes requests across comma-separated

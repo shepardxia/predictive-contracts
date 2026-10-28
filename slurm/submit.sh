@@ -1,5 +1,5 @@
 #!/bin/bash
-# Submit four-A100 jobs on short-unkillable; each requeues until its stage finishes.
+# Submit the three legibility conditions and their shared prerequisites.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 ROOT="$SCRATCH/predictive-contracts"
@@ -17,11 +17,7 @@ submit() {
     echo "$id"
 }
 BASE=$(submit base_prepare '' base)
-CW=$(submit commitment_warmup "$BASE" commitment_warmup)
 HW=$(submit hacking_warmup "$BASE" hacking_warmup)
-submit commitment_task_s1 '' task
-submit commitment_prediction_s1 "$CW" commitment
-submit commitment_agreement_s1 "$CW" commitment --attempt-agreement
 submit legibility_task_s1 "$HW" task --init-adapter "$ROOT/runs/hacking_warmup/final"
 submit legibility_penalty_s1 "$HW" monitor --reward penalty --penalty 2
 submit legibility_reward_s1 "$HW" monitor --reward legibility
